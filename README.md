@@ -8,73 +8,107 @@ This repository provides a standardized evaluation harness for reproducible agen
 
 ## Features
 
-* **Unified `hal-eval` CLI across all benchmarks and agent types**
+- **Unified `hal-eval` CLI across all benchmarks and agent types**
+
   - HAL supports SWE-bench Verified, USACO, AppWorld, CORE-bench, AgentHarm, GAIA, Cybench, tau-bench, with support for more coming soon
   - Run your and existing agents on HAL with the same CLI across benchmarks (see [How Do I Run Evaluations?](#how-do-i-run-evaluations))
 
-* **Evaluations locally or in the cloud AND fully parallelized**
+- **Evaluations locally or in the cloud AND fully parallelized**
+
   - Local execution with conda environment isolation
   - Docker container support for isolated local execution
   - Azure VM support for running evaluations in the cloud
   - Configurable concurrency for parallel evaluation
 
-* **Automatic logging and monitoring**
+- **Automatic logging and monitoring**
+
   - Integration with [Weave](https://wandb.ai/site/weave/) for detailed cost tracking and usage metrics
   - Automatic logging of agent traces
 
-* **No constraints on agent implementation or agent framework**
+- **No constraints on agent implementation or agent framework**
+
   - No constraints on specific agent implementation or agent framework (see [How Do I Develop My Own Agents?](#how-do-i-develop-my-own-agents))
   - Support for both custom agents and Inspect AI solvers
   - Flexible agent configuration through command-line arguments in `hal-eval`
 
-* **Share and access agent traces**
+- **Share and access agent traces**
+
   - Simple upload of agent traces to HuggingFace Hub via `hal-upload` CLI (see [How Can I Submit My Results to the HAL Leaderboards?](#how-can-i-submit-my-results-to-the-hal-leaderboards))
   - Automatic encryption of agent traces before uploading to avoid benchmark contamination
 
-* **HAL leaderboard integration**
+- **HAL leaderboard integration**
   - Direct integration with the [Holistic Agent Leaderboard (HAL)](https://hal.cs.princeton.edu)
   - Detailed metrics and in-depth performance analysis
 
 ## Table of Contents
 
-1. [Setup](#setup)
-2. [Which Benchmarks Are Supported?](#which-benchmarks-are-supported)
-3. [How Do I Run Evaluations? (With Examples)](#how-do-i-run-evaluations)
-4. [How Do I Develop My Own Agents?](#how-do-i-develop-my-own-agents)
-5. [How to Reproduce Existing Agents on HAL?](#how-to-reproduce-existing-agents-on-hal)
-5. [How Do I Add a Benchmark?](#how-do-i-add-a-benchmark)
-6. [How Can I Submit My Results to the HAL Leaderboards?](#how-can-i-submit-my-results-to-the-hal-leaderboards)
-7. [How Can I Use the Agent Traces from the HAL Leaderboard?](#how-can-i-use-the-agent-traces-from-the-hal-leaderboard)
-8. [About](#about-hal)
-9. [Repository Structure](#repository-structure)
-10. [Citing HAL](#citing-hal)
+- [HAL: The Holistic Agent Leaderboard](#hal-the-holistic-agent-leaderboard)
+  - [Features](#features)
+  - [Table of Contents](#table-of-contents)
+  - [Setup](#setup)
+  - [Which Benchmarks Are Supported?](#which-benchmarks-are-supported)
+    - [SWE-bench Verified (Mini)](#swe-bench-verified-mini)
+    - [USACO](#usaco)
+    - [AppWorld](#appworld)
+    - [CORE-bench](#core-bench)
+    - [tau-bench](#tau-bench)
+    - [SciCode](#scicode)
+    - [AssistantBench](#assistantbench)
+    - [Inspect AI Benchmarks](#inspect-ai-benchmarks)
+      - [Gaia](#gaia)
+      - [Cybench](#cybench)
+      - [AgentHarm](#agentharm)
+    - [CORE-Bench](#core-bench-1)
+    - [ScienceAgentBench](#scienceagentbench)
+    - [CollaborativeAgentBench](#collaborativeagentbench)
+  - [How Do I Run Evaluations?](#how-do-i-run-evaluations)
+    - [Core Options](#core-options)
+    - [Additional Options](#additional-options)
+    - [Example Evaluations](#example-evaluations)
+    - [Agent Naming Guidelines](#agent-naming-guidelines)
+  - [How to Reproduce Existing Agents on HAL?](#how-to-reproduce-existing-agents-on-hal)
+  - [How Do I Develop My Own Agents?](#how-do-i-develop-my-own-agents)
+  - [How Do I Add a Benchmark?](#how-do-i-add-a-benchmark)
+  - [How Can I Submit My Results to the HAL Leaderboards?](#how-can-i-submit-my-results-to-the-hal-leaderboards)
+  - [How can I use the agent traces from the HAL Leaderboard?](#how-can-i-use-the-agent-traces-from-the-hal-leaderboard)
+  - [About HAL](#about-hal)
+  - [Repository Structure](#repository-structure)
+  - [Citing HAL](#citing-hal)
+  - [Auto Inspector and Fix Workflow](#auto-inspector-and-fix-workflow)
+    - [Fix Package Structure](#fix-package-structure)
+
 ## Setup
 
 1. **Clone the repository:**
+
    ```bash
    git clone --recursive https://github.com/benediktstroebl/hal-harness.git
    cd hal-harness
    ```
 
 2. **Create conda environment:**
+
    ```bash
    conda create -n hal python=3.12
    conda activate hal
    ```
 
 3. **Install the `hal` package:**
+
    ```bash
    pip install -e .
    ```
 
 4. **Create a `.env` file:**
+
    ```bash
    cp .env.template .env
    ```
+
    Add your API keys (HuggingFace, Weave, OpenAI/other LLMs as needed) to the `.env` file. See `.env.template` for details.
 
 5. **Install Model Provider Dependencies:**
-   
+
    You'll need to install the appropriate Python SDK for your chosen model provider:
 
    ```bash
@@ -87,6 +121,7 @@ This repository provides a standardized evaluation harness for reproducible agen
 
 6. **Optional: Azure VM Setup**
    If you plan to use Azure VMs for evaluation, add the following to your `.env`:
+
    ```
    AZURE_SUBSCRIPTION_ID=your_subscription_id
    AZURE_RESOURCE_GROUP_NAME=your_resource_group
@@ -95,37 +130,41 @@ This repository provides a standardized evaluation harness for reproducible agen
    SSH_PRIVATE_KEY_PATH=/path/to/your/ssh/key
    NETWORK_SECURITY_GROUP_NAME=your_nsg_name
    ```
-   
+
    Then run the following command to install the optional azure dependencies:
+
    ```bash
    pip install -e .[azure]
    ```
-   
+
 7. **Optional: Docker Setup**
    If you plan to use Docker containers for isolated evaluation, make sure Docker is installed on your system. The harness will automatically build the required Docker image.
-   
 
 ## Which Benchmarks Are Supported?
 
 ### [SWE-bench Verified (Mini)](https://github.com/princeton-nlp/SWE-bench)
+
 - Evaluates code generation and bug fixing capabilities
-- Full dataset (`swebench_verified`) or mini version (`swebench_verified_mini`)
-- Mini version is a subset of 50 randomly selected problems from the full dataset
-- Supports local, Docker, and VM execution
-- The task ids part of SWE-Bench Verified (Mini) can be found [here](https://github.com/benediktstroebl/agent-eval-harness/blob/7b231a952828022a43977f21acfd452adda5088c/agent_eval_harness/benchmarks/swebench_verified_mini_task_ids.txt)
-- **Does not support arm64 machines**
+
+* Full dataset (`swebench_verified`) or mini version (`swebench_verified_mini`)
+* Mini version is a subset of 50 randomly selected problems from the full dataset
+* Supports local, Docker, and VM execution
+* The task ids part of SWE-Bench Verified (Mini) can be found [here](https://github.com/benediktstroebl/agent-eval-harness/blob/7b231a952828022a43977f21acfd452adda5088c/agent_eval_harness/benchmarks/swebench_verified_mini_task_ids.txt)
+* **Does not support arm64 machines**
 
 For SWE-bench Verified, you will need to install the SWE-bench benchmark specific dependencies:
+
 ```bash
 pip install -e .[swebench]
 ```
 
 You will also need to **install docker** following the instructions [here](https://docs.docker.com/engine/install/). Docker is used during evaluation to run the SWE-bench tasks. For linux users, you will also need to complete the linux post-installation steps [here](https://docs.docker.com/engine/install/linux-postinstall/).
- 
 
 ### [USACO](https://github.com/princeton-nlp/USACO)
+
 - Programming competition problems
-- Supports local, Docker, and VM execution
+
+* Supports local, Docker, and VM execution
 
 For USACO, you will need to download and extract the USACO dataset. This can be done with the following steps:
 
@@ -133,11 +172,13 @@ For USACO, you will need to download and extract the USACO dataset. This can be 
 2. Unzip the dataset and move the `data` directory to `hal/benchmarks/USACO/`. Hence there should be a `data/` directory in `hal/benchmarks/USACO/`
 
 You will also need to **install docker** following the instructions [here](https://docs.docker.com/engine/install/). Docker is used during evaluation to run the USACO tasks. For linux users, you will also need to complete the linux post-installation steps [here](https://docs.docker.com/engine/install/linux-postinstall/).
- 
+
 ### [AppWorld](https://appworld.dev/)
+
 - A benchmark for complex function/tool calling and/or coding agents
-- Built on a high-fidelity API-based simulation of real-world apps, like Amazon, Gmail, Spotify, etc.
-- Supports both local and VM execution.
+
+* Built on a high-fidelity API-based simulation of real-world apps, like Amazon, Gmail, Spotify, etc.
+* Supports both local and VM execution.
 
 Install benchmark specific dependencies:
 
@@ -173,63 +214,82 @@ hal-eval --benchmark appworld_${DATASET_NAME} \
 You can also convert HAL experiment outputs to AppWorld experiment outputs (via [this](https://github.com/StonyBrookNLP/appworld/blob/main/scripts/appworld_to_hal_leaderboard.py)) and vice versa (via [this](https://github.com/StonyBrookNLP/appworld/blob/main/scripts/hal_to_appworld__leaderboard.py)), to easily submit to both leaderboards.
 
 ### [CORE-bench](https://github.com/siegelz/core-bench)
+
 - Computational reproducibility benchmark for agents on real scientific papers
-- Supports fully parallelized evaluation on Azure VMs
+
+* Supports fully parallelized evaluation on Azure VMs
 
 ### [tau-bench](https://github.com/tau-bench/tau-bench)
+
 - Install benchmark specific dependencies:
+
 ```bash
 pip install -e .[taubench]
 ```
+
 - Benchmark for Tool-Agent-User Interaction in real-world domains
-- Supports fully parallelized evaluation on Azure VMs
+
+* Supports fully parallelized evaluation on Azure VMs
 
 ### [SciCode](https://github.com/scicode-bench/SciCode)
+
 - Programming realistic scientific research problems
-- Supports three versions: 
+
+* Supports three versions:
   1. `scicode` : standard version from the paper where agent solves subtasks iteratively
   2. `scicode_easy` : agent solves subtasks iteratively but has access to additional background information
   3. `scicode_hard` : agent solves each full problem in a zero-shot format
-- Supports both local and VM execution
+* Supports both local and VM execution
 
 For all SciCode benchmarks, you will need to download and extract the SciCode unit tests. This can be done with the following steps:
 
 1. Download the unit tests [here](https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR)
 2. Move the file to `hal/benchmarks/SciCode/eval/data/`.
 3. Install benchmark specific dependencies:
+
 ```bash
 pip install -e .[scicode]
 ```
 
 ### [AssistantBench](https://github.com/oriyor/assistantbench)
-- Benchmark evaluating an agent's ability to solve realistic and time-consuming web search tasks. 
-- Evaluation uses scoring system from [BrowserGym](https://github.com/ServiceNow/BrowserGym)
+
+- Benchmark evaluating an agent's ability to solve realistic and time-consuming web search tasks.
+
+* Evaluation uses scoring system from [BrowserGym](https://github.com/ServiceNow/BrowserGym)
 
 ### [Inspect AI Benchmarks](https://github.com/UKGovernmentBEIS/inspect_ai)
+
 - Supports a number of [Inspect AI](https://github.com/UKGovernmentBEIS/inspect_ai) agent tasks (`inspect_evals/<task_name>`)
-- Two agent types supported:
+
+* Two agent types supported:
   1. Inspect Solver agents (using `@solver` decorator)
   2. Custom external agents
-- Inspect solvers are run locally by default with orchestration being done by inspect_ai. Custom agents are run using the harness and can be run either locally or on Azure VMs via the `--vm` flag.
+* Inspect solvers are run locally by default with orchestration being done by inspect_ai. Custom agents are run using the harness and can be run either locally or on Azure VMs via the `--vm` flag.
 
 #### [Gaia](https://arxiv.org/abs/2311.12983)
+
 - General AI assistants benchmark
-- More details on Inspect AI implementation [here](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/gaia)
+
+* More details on Inspect AI implementation [here](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/gaia)
 
 #### [Cybench](https://arxiv.org/abs/2408.08926)
+
 - Cybersecurity agent task
-- **Does not support arm64 machines**
-- More details on Inspect AI implementation [here](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/cybench)
-- Additional **Docker Configuration** required for Cybench:
+
+* **Does not support arm64 machines**
+* More details on Inspect AI implementation [here](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/cybench)
+* Additional **Docker Configuration** required for Cybench:
 
 For Cybench, you'll need to configure Docker's default address pools to avoid IP address conflicts when running the harness. Follow these steps:
 
 1. Edit or create the daemon.json file:
+
    ```bash
    sudo nano /etc/docker/daemon.json
    ```
 
 2. Add or modify the default-address-pools configuration. For example:
+
    ```json
    {
      "default-address-pools": [
@@ -250,6 +310,7 @@ For Cybench, you'll need to configure Docker's default address pools to avoid IP
    ```
 
 3. Save the file and restart the Docker daemon:
+
    ```bash
    sudo systemctl restart docker
    ```
@@ -264,6 +325,7 @@ Now the harness should be able to run Cybench.
   - `inspect_evals/agentharm_benign`: Evaluates agent behavior on benign tasks
 - When using the default inspect agent with benign tasks, requires setting `-A task_name=benign`
 - Example usage:
+
 ```bash
 # For benign tasks
 hal-eval --benchmark inspect_evals/agentharm_benign \
@@ -284,21 +346,27 @@ hal-eval --benchmark inspect_evals/agentharm \
 ### [CORE-Bench](https://arxiv.org/abs/2409.11363)
 
 - Begin by decrypting `hal/benchmarks/corebench/core_test.json.gpg` to access the `CORE-Bench` test set. The password for the GPG file is `reproducibility`. To decrypt the file, run the following command:
+
 ```bash
 gpg --output hal/benchmarks/corebench/core_test.json --decrypt hal/benchmarks/corebench/core_test.json.gpg
 ```
+
 - Install benchmark specific dependencies:
+
 ```bash
 pip install -e .[corebench,coreagent]
 ```
+
 - Benchmark for evaluating how agents can reproduce the results of scientific papers when provided with their code.
-- Tasks involve setting up the environment, running the code, and answering questions about the results.
-- Capsules and task files will automatically be downloaded upon running the benchmark.
-- Three variants available:
+
+* Tasks involve setting up the environment, running the code, and answering questions about the results.
+* Capsules and task files will automatically be downloaded upon running the benchmark.
+* Three variants available:
   - `corebench_easy` - Agent provided with results and must answer task questions.
   - `corebench_medium` - Agent provided with Docker container to install dependencies and run code, and must answer task questions.
   - `corebench_hard` - Agent must install dependencies and run code from scratch, and answer task questions.
-- Example usage:
+* Example usage:
+
 ```bash
 hal-eval --benchmark corebench_hard \
   --agent_dir agents/core_agent \
@@ -308,12 +376,15 @@ hal-eval --benchmark corebench_hard \
 ```
 
 ### [ScienceAgentBench](https://github.com/osunlp/ScienceAgentBench)
+
 - Benchmark for evaluating agents' capabilities to solve real-world data-driven discovery tasks collected from scientific publications.
-- Tasks involve processing, modeling, analyzing, and visualizing scientific data from four disciplines.
-- Evaluates programs in a Docker container environment for consistent evaluation.
-- Supports local (does not allow concurrency for self-debug), docker (recommended), and VM execution.
+
+* Tasks involve processing, modeling, analyzing, and visualizing scientific data from four disciplines.
+* Evaluates programs in a Docker container environment for consistent evaluation.
+* Supports local (does not allow concurrency for self-debug), docker (recommended), and VM execution.
 
 ScienceAgentBench will be automatically downloaded via the Hugging Face datasets library. To execute the tasks, you will need to additionally download the scientific data used in ScienceAgentBench [here](https://buckeyemailosu-my.sharepoint.com/:u:/g/personal/chen_8336_buckeyemail_osu_edu/EQuA6uJ3CtRHvRfZ2GiN1tYBRVJE4DSUD10MW61fr7HuSQ?e=sCBegG). Then, you can extract the data using the password `scienceagentbench` as follows:
+
 ```bash
 mv benchmark.zip hal/benchmarks/scienceagentbench/ScienceAgentBench
 cd hal/benchmarks/scienceagentbench/ScienceAgentBench
@@ -321,6 +392,7 @@ unzip -P [password] benchmark.zip
 ```
 
 Requirements for the example direct prompting and self-debug agents (agents/sab_example_agent):
+
 ```
 backoff==2.2.1
 boto3==1.37.1
@@ -330,7 +402,9 @@ pipreqs
 ```
 
 Examples:
+
 - Running direct prompting agent locally
+
 ```bash
 hal-eval --benchmark scienceagentbench \
   --agent_dir agents/sab_example_agent/ \
@@ -342,7 +416,9 @@ hal-eval --benchmark scienceagentbench \
   -A use_knowledge=False \
   --max_concurrent 10
 ```
+
 - Running self-debug agent with Docker
+
 ```bash
 hal-eval --benchmark scienceagentbench \
   --agent_dir agents/sab_example_agent/ \
@@ -357,23 +433,26 @@ hal-eval --benchmark scienceagentbench \
 ```
 
 Agent Arguments:
+
 - `model_name`: name of base LLM (currently supporting OpenAI and AWS Bedrock)
 - `use_self_debug`: using the self-debug agent instead of direct prompting if `True`
 - `use_knowledge`: using the expert-annotated domain knowledge as additional agent input if `True`
 
 If you are running your own agent, you will need to submit the python script in the following way at the end of your agent run function. You can see an example of this in the `main.py` file in the `hal_generalist_agent` directory.
 
-```python
+````python
 return {task_id: {"history": [{"role": "assistant", "content": f"```python{response}```"}], "cost": 0.0}}
-```
-
+````
 
 ### [CollaborativeAgentBench](https://github.com/facebookresearch/sweet_rl)
+
 - Benchmark for evaluating agents' capabilities to collaborate with humans for artifact creations
-- Supports both frontend design and backend programming
+
+* Supports both frontend design and backend programming
 
 For evaluation, follow the steps from [here](https://github.com/facebookresearch/sweet_rl) to set up, including installing packages, downloading data, and installing geckodriver (for frontend design only).
 Example script for evaluations on colbench:
+
 ```bash
 hal-eval --benchmark colbench_backend_programming --agent_dir agents/colbench_example_agent \
     --agent_name colbench_text_70b \
@@ -402,38 +481,39 @@ hal-eval --benchmark <benchmark_name> --agent_dir <agent_directory> --agent_func
 
 ### Core Options
 
-*   **`--benchmark <benchmark_name>`**: The name of the benchmark to run. Supported benchmarks:
-    - `swebench_verified`: Full SWE-bench Verified dataset
-    - `swebench_verified_mini`: Mini version with 50 randomly selected problems
-    - `usaco`: USACO programming competition problems
-    - `appworld_test_normal`: AppWorld normal test suite
-    - `appworld_test_challenge`: AppWorld challenge test suite
-    - `taubench_retail`: tau-bench retail domain
-    - `taubench_airline`: tau-bench airline domain
-    - `inspect_evals/gaia`: Gaia general AI assistants benchmark
-    - `inspect_evals/cybench`: Cybersecurity agent tasks
-    - `inspect_evals/agentharm`: AgentHarm
-    - `inspect_evals/agentharm_benign`: AgentHarm benign evaluation
-*   **`--agent_dir <agent_directory>`**: Path to the directory containing your agent's code
-*   **`--agent_function <agent_function>`**: The name of the agent's main function (e.g., `agent.run` if `agent.py` in agent directory contains `def run(): ...`)
-*   **`--agent_name <agent_name>`**: A descriptive name for your agent (used in logging/leaderboard) (e.g., `My Agent (gpt-4o)`)
+- **`--benchmark <benchmark_name>`**: The name of the benchmark to run. Supported benchmarks:
+  - `swebench_verified`: Full SWE-bench Verified dataset
+  - `swebench_verified_mini`: Mini version with 50 randomly selected problems
+  - `usaco`: USACO programming competition problems
+  - `appworld_test_normal`: AppWorld normal test suite
+  - `appworld_test_challenge`: AppWorld challenge test suite
+  - `taubench_retail`: tau-bench retail domain
+  - `taubench_airline`: tau-bench airline domain
+  - `inspect_evals/gaia`: Gaia general AI assistants benchmark
+  - `inspect_evals/cybench`: Cybersecurity agent tasks
+  - `inspect_evals/agentharm`: AgentHarm
+  - `inspect_evals/agentharm_benign`: AgentHarm benign evaluation
+- **`--agent_dir <agent_directory>`**: Path to the directory containing your agent's code
+- **`--agent_function <agent_function>`**: The name of the agent's main function (e.g., `agent.run` if `agent.py` in agent directory contains `def run(): ...`)
+- **`--agent_name <agent_name>`**: A descriptive name for your agent (used in logging/leaderboard) (e.g., `My Agent (gpt-4o)`)
 
 ### Additional Options
 
-*   **`-A <key>=<value>`**: Agent arguments passed to your agent function
-*   **`-B <key>=<value>`**: Benchmark arguments passed to the benchmark
-*   **`-I <key>=<value>`**: Inspect-specific arguments (for Inspect AI benchmarks)
-*   **`--upload`**: Upload results to HuggingFace Hub
-*   **`--max_concurrent <number>`**: Number of parallel tasks (default: 1)
-*   **`--conda_env_name <env_name>`**: Conda environment for agent execution
-*   **`--vm`**: Run evaluation on Azure VMs
-*   **`--docker`**: Run evaluation in Docker containers for isolation
-*   **`--run_id <run_id>`**: Specify a run ID (useful for continuing runs)
-*   **`--continue_run`**: Continue from a previous run (requires run_id)
+- **`-A <key>=<value>`**: Agent arguments passed to your agent function
+- **`-B <key>=<value>`**: Benchmark arguments passed to the benchmark
+- **`-I <key>=<value>`**: Inspect-specific arguments (for Inspect AI benchmarks)
+- **`--upload`**: Upload results to HuggingFace Hub
+- **`--max_concurrent <number>`**: Number of parallel tasks (default: 1)
+- **`--conda_env_name <env_name>`**: Conda environment for agent execution
+- **`--vm`**: Run evaluation on Azure VMs
+- **`--docker`**: Run evaluation in Docker containers for isolation
+- **`--run_id <run_id>`**: Specify a run ID (useful for continuing runs)
+- **`--continue_run`**: Continue from a previous run (requires run_id)
 
 ### Example Evaluations
 
 1. **Running SWE-bench locally:**
+
 ```bash
 hal-eval --benchmark swebench_verified_mini \
   --agent_dir agents/swebench_example_agent/ \
@@ -443,7 +523,8 @@ hal-eval --benchmark swebench_verified_mini \
   --max_concurrent 5
 ```
 
-2. **Running USACO in Docker containers:**
+1. **Running USACO in Docker containers:**
+
 ```bash
 hal-eval --benchmark usaco \
   --agent_dir agents/usaco_example_agent/ \
@@ -454,7 +535,8 @@ hal-eval --benchmark usaco \
   -A model_name=gpt-4o-mini-2024-07-18
 ```
 
-3. **Running USACO on Azure VM:**
+1. **Running USACO on Azure VM:**
+
 ```bash
 hal-eval --benchmark usaco \
   --agent_dir agents/usaco_example_agent/ \
@@ -465,7 +547,8 @@ hal-eval --benchmark usaco \
   -A model_name=gpt-4o-2024-11-20
 ```
 
-4. **Running USACO with Amazon Bedrock models:**
+1. **Running USACO with Amazon Bedrock models:**
+
 ```bash
 hal-eval --benchmark usaco \
   --agent_dir agents/usaco_bedrock_models/ \
@@ -479,17 +562,19 @@ hal-eval --benchmark usaco \
 More details on how to run the Amazon Bedrock models can be found [here](agents/RUN_AGENTS.md).
 
 Available Bedrock models and their corresponding prompt templates:
-| Model Name | Model ID | Prompt Template |
-|-|-|-|
-| Claude 3.5 Haiku | bedrock/us.anthropic.claude-3-5-haiku-20241022-v1:0 | claude.txt |
-| Claude 3.5 Sonnet | bedrock/us.anthropic.claude-3-5-sonnet-20241022-v2:0 | claude.txt |
-| Claude 3 Sonnet | bedrock/us.anthropic.claude-3-sonnet-20240229-v1:0 | claude.txt |
-| Amazon Nova Pro | bedrock/amazon.nova-pro-v1:0 | nova.txt |
-| Amazon Nova Lite | bedrock/amazon.nova-lite-v1:0 | nova.txt |
-| Amazon Nova Micro | bedrock/amazon.nova-micro-v1:0 | nova.txt |
-| Llama-3.3 70B | bedrock/us.meta.llama3-3-70b-instruct-v1:0 | llama.txt |
 
-5. **Running Inspect AI benchmark:**
+| Model Name        | Model ID                                             | Prompt Template |
+| ----------------- | ---------------------------------------------------- | --------------- |
+| Claude 3.5 Haiku  | bedrock/us.anthropic.claude-3-5-haiku-20241022-v1:0  | claude.txt      |
+| Claude 3.5 Sonnet | bedrock/us.anthropic.claude-3-5-sonnet-20241022-v2:0 | claude.txt      |
+| Claude 3 Sonnet   | bedrock/us.anthropic.claude-3-sonnet-20240229-v1:0   | claude.txt      |
+| Amazon Nova Pro   | bedrock/amazon.nova-pro-v1:0                         | nova.txt        |
+| Amazon Nova Lite  | bedrock/amazon.nova-lite-v1:0                        | nova.txt        |
+| Amazon Nova Micro | bedrock/amazon.nova-micro-v1:0                       | nova.txt        |
+| Llama-3.3 70B     | bedrock/us.meta.llama3-3-70b-instruct-v1:0           | llama.txt       |
+
+1. **Running Inspect AI benchmark:**
+
 ```bash
 hal-eval --benchmark inspect_evals/gaia \
   --agent_dir agents/inspect/ \
@@ -500,7 +585,8 @@ hal-eval --benchmark inspect_evals/gaia \
   -I temperature=0.4
 ```
 
-3. **Running ScienceAgentBench locally:**
+1. **Running ScienceAgentBench locally:**
+
 ```bash
 hal-eval --benchmark scienceagentbench \
   --agent_dir agents/sab_example_agent/ \
@@ -514,11 +600,13 @@ hal-eval --benchmark scienceagentbench \
 ### Agent Naming Guidelines
 
 Agent names should follow this format: `Name (model1, model2)`. For example:
+
 - `My Agent (gpt-4-0125-preview)`
 - `SWE-agent (claude-3.5-sonnet-20241022-v2)`
 - `Multi-Model Agent (gpt-4o-mini-2024-07-18, claude-3.5-sonnet-20241022-v2)`
 
 Guidelines:
+
 - Include exact model versions
 - Put models in parentheses
 - Separate multiple models with commas
@@ -544,20 +632,21 @@ See [hal/benchmarks/README.md](hal/benchmarks/README.md) for details.
 Results can be uploaded to the [Holistic Agent Leaderboard (HAL)](https://hal.cs.princeton.edu) in several ways. To avoid benchmark contamination, we automatically encrypt the results before uploading.
 
 1. **During Evaluation:**
+
    ```bash
    hal-eval --benchmark <benchmark> ... --upload
    ```
 
 2. **After Evaluation:**
-For submitting results to the leaderboard, upload the files ending with `_UPLOAD.json` located in the generatedrun directories `results/<benchmark_name>/<run_id>/`. There are multiple ways to do this. 
+   For submitting results to the leaderboard, upload the files ending with `_UPLOAD.json` located in the generatedrun directories `results/<benchmark_name>/<run_id>/`. There are multiple ways to do this.
 
    ```bash
    # Upload all results for a benchmark (this will upload all files ending with `_UPLOAD.json` in the run directories for the benchmark)
    hal-upload -B <benchmark_name>
-   
+
    # Upload a single file
    hal-upload -F path/to/<run_id>_UPLOAD.json
-   
+
    # Upload all files in a directory you point to (you can move the files you want to this directory and then upload)
    hal-upload -D path/to/directory
    ```
@@ -570,11 +659,13 @@ For each benchmark and agent on [HAL](hal.cs.princeton.edu), you can download th
 2. Use the `hal-decrypt` command to decrypt the traces. You can either decrypt and entire directory of traces or a single trace. For example:
 
 Entire directory:
+
 ```bash
 hal-decrypt -D path/to/directory
 ```
 
 Single trace:
+
 ```bash
 hal-decrypt -F taubench_airline_1743961943_UPLOAD.zip
 ```
@@ -591,23 +682,22 @@ Check out this [issue](https://github.com/princeton-pli/hal-harness/issues/16) f
 
 ## Repository Structure
 
-*   `hal/`: Core harness code
-    *   `benchmarks/`: Benchmark implementations
-        - `swebench.py`: SWE-bench implementation
-        - `usaco.py`: USACO implementation
-        - `mlagentbench.py`: MLAgentBench implementation
-        - `appworld.py`: AppWorld implementation
-        - `taubench.py`: tau-bench implementation
-        - `inspect_benchmark.py`: Inspect AI benchmark support
-    *   `utils/`: Utility functions
-        - `local_runner.py`: Local execution support
-        - `vm_runner.py`: Azure VM execution support
-        - `docker_runner.py`: Docker container execution support
-        - `weave_utils.py`: Weave logging utilities
-    *   `inspect/`: Inspect AI specific code
-*   `agents/`: Example agent implementations
-*   `results/`: Evaluation results and logs
-
+- `hal/`: Core harness code
+  - `benchmarks/`: Benchmark implementations
+    - `swebench.py`: SWE-bench implementation
+    - `usaco.py`: USACO implementation
+    - `mlagentbench.py`: MLAgentBench implementation
+    - `appworld.py`: AppWorld implementation
+    - `taubench.py`: tau-bench implementation
+    - `inspect_benchmark.py`: Inspect AI benchmark support
+  - `utils/`: Utility functions
+    - `local_runner.py`: Local execution support
+    - `vm_runner.py`: Azure VM execution support
+    - `docker_runner.py`: Docker container execution support
+    - `weave_utils.py`: Weave logging utilities
+  - `inspect/`: Inspect AI specific code
+- `agents/`: Example agent implementations
+- `results/`: Evaluation results and logs
 
 ## Citing HAL
 
@@ -621,24 +711,27 @@ If you use HAL or the HAL harness in your research, please cite it by using the 
   year =         {2025}
 }
 ```
+
 ## Auto Inspector and Fix Workflow
 
 When you run:
 
 ```bash
 python scripts/auto_debug_batch.py \
-  --rubrics-csv <path/to/environmental_barrier_rubrics.csv> \
+  --fixable-output-dir ../fixable_output \
   --traces-dir <path/to/traces> \
   --agent-dir agents/hal_generalist_agent \
   --agent-args agent_args.json \
   --benchmark-name swebench_verified_mini
+# Optionally add --task-id <task_id> (repeatable) to limit the run to specific rubric entries.
 ```
 
 the pipeline will:
 
-1. Generate an inspection report for each task under `results/debug_fixes/<task_id>/<run_id>/inspection_report.json`.
-2. Instruct you to create a self-contained fix package inside `fixes/<task_id>/`.
-3. If a fix package exists, automatically rerun the debugger with those overrides applied and log the results next to the inspection report.
+1. Load **every** CSV under `../fixable_output` (or the legacy `--rubrics-csv`) and write `debug/fixable_summary.json`, which lists each task flagged with `grade > 0` along with its explanation, source CSV, and criterion so you can see every “score = 1” issue at a glance.
+2. Generate an inspection report per task under `debug/<task_id>/<run_id>/inspection_report.json`, including rich context (task input, env vars, agent tree, tool description, prior rerun output) plus a `coding_agent_context` block the fixer agent can paste directly into its system prompt. This block now lists both the full rerun command and a single-task command that appends `--task-id <task_id>` so coding agents can iterate quickly.
+3. Instruct you to create a self-contained fix package inside `fixes/<task_id>/`.
+4. If a fix package exists, automatically rerun the debugger with those overrides applied and log the results (including a `post_rerun_report.json`) next to the inspection report.
 
 ### Fix Package Structure
 
@@ -651,6 +744,7 @@ All edits must be captured inside the task-specific directory under `fixes/`. Ne
 - `env_override.json` – JSON object of env vars injected for this rerun only.
 
 Example layout:
+
 ```
 fixes/
   django__django-12155/
@@ -662,3 +756,5 @@ fixes/
 ```
 
 The inspector’s `coding_agent_context` block also includes the working directory, a ready-to-use system prompt, the fix folder path, and the exact `python scripts/auto_debug_batch.py ...` command to rerun after packaging fixes.
+
+**Important:** fixes must always be self-contained inside `fixes/<task_id>/`. Overlays under `agent/` or `patch.diff` are copied into a temporary workspace right before rerunning, so the original agent sources remain untouched. This keeps the repository clean while still allowing arbitrarily complex patches, env overrides, or prompt changes through `input_override.json`. When iterating, prefer the inspector-provided single-task command (`... --task-id <task_id>`) so you only rerun the rubric under active investigation before falling back to the full batch rerun.

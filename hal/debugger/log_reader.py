@@ -4,7 +4,7 @@ import csv
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 LOGGER = logging.getLogger(__name__)
 TAIL_BYTES = 4096
@@ -13,9 +13,15 @@ TAIL_BYTES = 4096
 class LogIngester:
     """Load HAL rubric rows and associated trace snippets."""
 
-    def __init__(self, csv_path: str | os.PathLike[str], traces_root_dir: str | os.PathLike[str]):
+    def __init__(
+        self,
+        csv_path: str | os.PathLike[str],
+        traces_root_dir: str | os.PathLike[str],
+        allowed_criteria: Optional[List[str]] = None,
+    ):
         self.csv_path = Path(csv_path)
         self.traces_root_dir = Path(traces_root_dir)
+        self.allowed_criteria = [c.lower() for c in allowed_criteria] if allowed_criteria else None
 
     def get_failing_tasks(self) -> List[Dict[str, Any]]:
         """Return every rubric entry that maps to an environmental barrier."""
@@ -26,7 +32,7 @@ class LogIngester:
         with self.csv_path.open("r", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
             for row in reader:
-                if not self._is_environmental_barrier(row):
+                if not self._include_row(row):
                     continue
 
                 task_id = (row.get("task_id") or "").strip()
@@ -35,6 +41,9 @@ class LogIngester:
                     continue
 
                 model_run = (row.get("model_run") or "").strip()
+                criteria = (row.get("criteria") or "").strip()
+                grade_str = (row.get("grade") or "0").strip()
+                grade_value = self._parse_grade(grade_str)
                 trace_content = self._load_trace_tail(model_run, task_id)
 
                 failures.append(
@@ -43,22 +52,20 @@ class LogIngester:
                         "explanation": (row.get("explanation") or "").strip(),
                         "trace_content": trace_content,
                         "model_run": model_run,
+                        "criteria": criteria,
+                        "grade": grade_str,
+                        "grade_numeric": grade_value,
+                        "raw_row": row,
                     }
                 )
         return failures
 
-    @staticmethod
-    def _is_environmental_barrier(row: Dict[str, Any]) -> bool:
+    def _include_row(self, row: Dict[str, Any]) -> bool:
         criteria = (row.get("criteria") or "").strip().lower()
-        if criteria != "environmentalbarrier":
+        if self.allowed_criteria is not None and criteria not in self.allowed_criteria:
             return False
 
-        grade_str = (row.get("grade") or "0").strip()
-        try:
-            grade = float(grade_str)
-        except ValueError:
-            LOGGER.debug("Unable to parse grade '%s'; treating as 0", grade_str)
-            return False
+        grade = self._parse_grade(row.get("grade"))
         return grade > 0
 
     def _load_trace_tail(self, model_run: str, task_id: str) -> str:
@@ -79,3 +86,11 @@ class LogIngester:
             if newline_idx != -1:
                 snippet = snippet[newline_idx + 1 :]
         return snippet.strip()
+
+    def _parse_grade(self, grade_raw: Optional[str]) -> float:
+        grade_str = (grade_raw or "0").strip()
+        try:
+            return float(grade_str)
+        except ValueError:
+            LOGGER.debug("Unable to parse grade '%s'; treating as 0", grade_str)
+            return 0.0
