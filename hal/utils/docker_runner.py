@@ -108,6 +108,7 @@ class DockerRunner:
             self.benchmark = benchmark
             # Get run directory from benchmark if provided
             run_dir = benchmark.get_run_dir(run_id) if benchmark else f"results/{run_id}"
+            os.makedirs(run_dir, exist_ok=True)
             submissions_file = os.path.join(run_dir, f"{run_id}_RAW_SUBMISSIONS.jsonl")
             
             tasks = []
@@ -424,12 +425,27 @@ class DockerRunner:
 import os
 import json
 import importlib.util
-import weave
 import traceback
 
 try:
-    # Initialize weave
-    weave.init("{run_id}")
+    weave = None
+    try:
+        import weave  # type: ignore
+        weave_available = True
+    except Exception as weave_import_error:
+        weave_available = False
+        print(f"Weave import failed, disabling tracing: {{weave_import_error}}")
+    
+    if weave_available:
+        try:
+            weave.init("{run_id}")
+            weave_enabled = True
+        except Exception as weave_init_error:
+            weave_enabled = False
+            weave = None
+            print(f"Weave init failed, disabling tracing: {{weave_init_error}}")
+    else:
+        weave_enabled = False
     
     # Load input data
     with open("input.json", "r") as f:
@@ -449,7 +465,15 @@ try:
     agent_fn = getattr(module, "{function_name}")
     
     # Run the agent function
-    with weave.attributes({{"weave_task_id": "{task_id}"}}):
+    if weave_enabled:
+        weave_ctx = weave.attributes({{"weave_task_id": "{task_id}"}})
+    else:
+        weave_ctx = None
+
+    if weave_ctx:
+        with weave_ctx:
+            result = agent_fn(input_data, **agent_args)
+    else:
         result = agent_fn(input_data, **agent_args)
     
     # Save output
@@ -463,4 +487,10 @@ except Exception as e:
         f.write(f"ERROR: {{str(e)}}\\n")
         f.write(traceback.format_exc())
     raise
+finally:
+    if 'weave' in globals() and weave is not None and weave_enabled:
+        try:
+            weave.finish()
+        except Exception:
+            pass
 ''' 
