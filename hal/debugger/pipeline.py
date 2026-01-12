@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio
+import copy
 import json
 import logging
 import os
@@ -8,17 +8,25 @@ import shutil
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from dotenv import dotenv_values
 
 from ..utils.docker_runner import DockerRunner
-from .auto_fixer import AutoFixer, FixSuggestion
+from .auto_inspector import AutoInspector
+from .fix_loader import (
+    FixPackage,
+    apply_agent_overlay,
+    apply_agent_patch,
+    load_fix_package,
+)
 from .task_utils import get_task_data
 
 LOGGER = logging.getLogger(__name__)
 
 
 class DebugPipeline:
-    """Coordinate the log ingestion, fix proposal, and re-run workflow."""
+    """Coordinate log ingestion, inspection, and manual fix reruns."""
 
     def __init__(
         self,
@@ -27,19 +35,19 @@ class DebugPipeline:
         agent_args: Optional[Dict[str, Any]] = None,
         agent_function: str | None = None,
         benchmark_name: str | None = None,
+        rerun_command: str,
     ) -> None:
         self.agent_dir = Path(agent_dir)
         if not self.agent_dir.exists():
             raise FileNotFoundError(f"Agent directory not found: {self.agent_dir}")
 
         self.benchmark_name = benchmark_name or os.getenv(
-            "HAL_AUTOFIX_BENCHMARK",
-            "swebench_verified",
+            "HAL_AUTOFIX_BENCHMARK", "swebench_verified"
         )
         self.results_root = Path("results") / "debug_fixes"
         self.results_root.mkdir(parents=True, exist_ok=True)
 
-        self.autofixer = AutoFixer(agent_dir=self.agent_dir)
+        self.auto_inspector = AutoInspector(agent_dir=self.agent_dir)
         self.agent_function = (
             agent_function
             or os.getenv("HAL_AUTOFIX_AGENT_FUNCTION")
@@ -53,11 +61,17 @@ class DebugPipeline:
             benchmark=None,
         )
         self.runner.verbose = True
+        self.fixes_root = Path("fixes")
+        self.fixes_root.mkdir(parents=True, exist_ok=True)
+        self.rerun_command = rerun_command
+        self._agent_tree_snapshot = self._collect_agent_tree()
+        self._env_summary = self._collect_env_summary()
+        self._tools_description = self._describe_agent_tools()
 
     async def run_batch_debug(self, failures_list: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Iterate over rubric failures sequentially."""
         results: List[Dict[str, Any]] = []
-        for failure in failures_list:
+        for idx, failure in enumerate(failures_list, start=1):
             try:
                 result = await self.debug_single_task(failure)
                 results.append(result)
@@ -71,57 +85,137 @@ class DebugPipeline:
         if not task_id:
             raise ValueError("failure_item missing task_id")
 
-        LOGGER.info("Processing task %s", task_id)
-        suggestion = self.autofixer.generate_fix(failure_item)
-        LOGGER.info(
-            "AutoFixer chose %s fix for %s", suggestion.fix_type.upper(), task_id
-        )
-
         task_payload = get_task_data(task_id, self.benchmark_name)
-        if suggestion.fix_type == "input":
-            task_payload["problem_statement"] = suggestion.content
-            agent_dir = self.agent_dir
-            temp_dir: Optional[Path] = None
-        else:
-            temp_dir = self._create_temp_agent_dir(task_id, suggestion.content)
-            agent_dir = temp_dir
 
-        dataset = {task_id: task_payload}
+        LOGGER.info("Inspecting task %s", task_id)
+        sanitized_id = self._sanitize_task_id(task_id)
         run_id = f"debug_{self._sanitize_task_id(task_id)}_{int(time.time())}"
         task_run_dir = self._get_task_run_dir(task_id, run_id)
-        self._log_task_event(
-            task_run_dir,
-            f"Starting rerun with run_id={run_id}, fix_type={suggestion.fix_type}",
+
+        context_blocks = self._build_context_blocks(
+            task_payload, None, None, task_run_dir
+        )
+        report = self.auto_inspector.generate_report(
+            failure_item,
+            log_dir=task_run_dir,
+            context_blocks=context_blocks,
+        )
+        report_dict = report.to_dict()
+        workspace_root = Path.cwd().resolve()
+        fix_dir = self.fixes_root / sanitized_id
+        if report_dict.get("next_steps"):
+            reminder = report_dict["next_steps"].strip()
+        else:
+            reminder = ""
+        next_steps_parts = [reminder] if reminder else []
+        next_steps_parts.append(
+            f"Create or update {fix_dir} with your overrides "
+            "(e.g., agent/, patch.diff, input_override.json, env_override.json)."
+        )
+        next_steps_parts.append(
+            f"After applying fixes, rerun `{self.rerun_command}` to re-evaluate with the debugger."
+        )
+        report_dict["next_steps"] = " ".join(part for part in next_steps_parts if part).strip()
+
+        report_dict["coding_agent_context"] = self._build_coding_agent_context(
+            workspace_root, fix_dir, self.rerun_command
         )
 
-        LOGGER.info(
-            "Launching DockerRunner for %s (run_id=%s). Logs: %s",
-            task_id,
-            run_id,
-            task_run_dir,
-        )
-        run_result = await self.runner.run_agent(
-            dataset=dataset,
-            agent_function=self.agent_function,
-            agent_dir=str(agent_dir),
-            agent_args=self.agent_args,
-            run_id=run_id,
-        )
-        LOGGER.info("Completed rerun for %s (run_id=%s)", task_id, run_id)
-        self._log_task_event(task_run_dir, "DockerRunner completed for this task.")
+        LOGGER.info("Inspection completed for %s", task_id)
+        self._write_json(task_run_dir / "inspection_report.json", report_dict, task_run_dir)
+
+        rerun_output: Optional[Dict[str, Any]] = None
+        fix_package = load_fix_package(sanitized_id, self.fixes_root)
+        if fix_package:
+            LOGGER.info("Fix package found for %s; preparing rerun", task_id)
+            rerun_output = await self._execute_fix_rerun(
+                task_id=task_id,
+                run_id=run_id,
+                task_run_dir=task_run_dir,
+                base_task_payload=task_payload,
+                fix_package=fix_package,
+            )
+            if rerun_output is not None:
+                self._write_json(task_run_dir / "rerun_results.json", rerun_output, task_run_dir)
+                followup_contexts = self._build_context_blocks(
+                    task_payload, fix_package, rerun_output, task_run_dir
+                )
+                followup_report = self.auto_inspector.generate_report(
+                    failure_item,
+                    log_dir=task_run_dir,
+                    context_blocks=followup_contexts,
+                )
+                followup_dict = followup_report.to_dict()
+                followup_dict["coding_agent_context"] = self._build_coding_agent_context(
+                    workspace_root, fix_dir, self.rerun_command
+                )
+                self._write_json(
+                    task_run_dir / "post_rerun_report.json",
+                    followup_dict,
+                    task_run_dir,
+                )
+        else:
+            self._log_task_event(
+                task_run_dir,
+                f"No fixes detected in {fix_dir}. Skipping rerun.",
+            )
 
         summary = {
             "task_id": task_id,
             "run_id": run_id,
-            "fix": suggestion.__dict__,
-            "results": run_result,
+            "report": report_dict,
         }
-        self._write_summary(task_run_dir, summary)
-
-        if temp_dir:
-            self._cleanup_temp_agent(temp_dir)
-
+        if rerun_output is not None:
+            summary["rerun_results"] = rerun_output
         return summary
+
+    async def _execute_fix_rerun(
+        self,
+        task_id: str,
+        run_id: str,
+        task_run_dir: Path,
+        base_task_payload: Dict[str, Any],
+        fix_package: FixPackage,
+    ) -> Optional[Dict[str, Any]]:
+        task_payload = copy.deepcopy(base_task_payload)
+        if fix_package.input_override:
+            task_payload.update(fix_package.input_override)
+
+        dataset = {task_id: task_payload}
+
+        temp_agent_dir: Optional[Path] = None
+        if fix_package.has_agent_changes:
+            temp_agent_dir = self._prepare_agent_dir(task_id, fix_package)
+            agent_dir = temp_agent_dir
+        else:
+            agent_dir = self.agent_dir
+
+        self._log_task_event(
+            task_run_dir,
+            "Running debugger with manual fixes applied.",
+        )
+
+        env_overrides = (
+            {task_id: fix_package.env_override}
+            if fix_package.env_override
+            else None
+        )
+
+        try:
+            run_result = await self.runner.run_agent(
+                dataset=dataset,
+                agent_function=self.agent_function,
+                agent_dir=str(agent_dir),
+                agent_args=self.agent_args,
+                run_id=run_id,
+                task_env_overrides=env_overrides,
+            )
+            self._log_task_event(task_run_dir, "Debugger rerun completed.")
+        finally:
+            if temp_agent_dir and temp_agent_dir.exists():
+                shutil.rmtree(temp_agent_dir, ignore_errors=True)
+
+        return run_result
 
     def _build_agent_args(self, override: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Merge CLI/env overrides with mandatory defaults."""
@@ -139,28 +233,23 @@ class DebugPipeline:
         agent_args.setdefault("benchmark_name", self.benchmark_name)
         return agent_args
 
-    def _create_temp_agent_dir(self, task_id: str, new_main_contents: str) -> Path:
-        """Create agents/temp_<task_id> and overwrite main.py with new code."""
+    def _prepare_agent_dir(self, task_id: str, fix_package: FixPackage) -> Path:
         sanitized = self._sanitize_task_id(task_id)
         temp_dir = self.agent_dir.parent / f"temp_{sanitized}"
         if temp_dir.exists():
             shutil.rmtree(temp_dir)
-        shutil.copytree(self.agent_dir, temp_dir, dirs_exist_ok=True)
+        shutil.copytree(self.agent_dir, temp_dir)
 
-        entrypoint = temp_dir / self.autofixer.entrypoint.name
-        entrypoint.write_text(new_main_contents, encoding="utf-8")
+        if fix_package.agent_overlay:
+            apply_agent_overlay(temp_dir, fix_package.agent_overlay)
+        if fix_package.agent_patch:
+            apply_agent_patch(temp_dir, fix_package.agent_patch)
+
         return temp_dir
 
-    def _cleanup_temp_agent(self, temp_dir: Path) -> None:
-        try:
-            shutil.rmtree(temp_dir)
-        except FileNotFoundError:
-            return
-
-    def _write_summary(self, output_dir: Path, payload: Dict[str, Any]) -> None:
-        summary_path = output_dir / "debug_summary.json"
-        summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        self._log_task_event(output_dir, f"Wrote summary to {summary_path.name}")
+    def _write_json(self, path: Path, payload: Dict[str, Any], log_dir: Path) -> None:
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self._log_task_event(log_dir, f"Wrote {path.name}")
 
     @staticmethod
     def _sanitize_task_id(task_id: str) -> str:
@@ -178,3 +267,101 @@ class DebugPipeline:
         timestamp = datetime.utcnow().isoformat(timespec="seconds") + "Z"
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(f"[{timestamp}] {message}\n")
+
+    def _build_context_blocks(
+        self,
+        task_payload: Dict[str, Any],
+        fix_package: Optional[FixPackage],
+        rerun_output: Optional[Dict[str, Any]],
+        task_run_dir: Path,
+    ) -> List[Tuple[str, str]]:
+        blocks: List[Tuple[str, str]] = []
+        blocks.append(("task_input", self._truncate(json.dumps(task_payload, indent=2))))
+        blocks.append(("agent_args", self._truncate(json.dumps(self.agent_args, indent=2))))
+        blocks.append(("env_summary", self._env_summary))
+        blocks.append(("agent_file_tree", self._agent_tree_snapshot))
+        blocks.append(("available_tools", self._tools_description))
+        if fix_package:
+            blocks.append(("fix_package", self._summarize_fix_package(fix_package)))
+        if rerun_output is not None:
+            blocks.append(("rerun_results", self._truncate(json.dumps(rerun_output, indent=2))))
+        log_path = task_run_dir / "pipeline.log"
+        blocks.append(("log_location", str(log_path)))
+        return blocks
+
+    def _build_coding_agent_context(
+        self, workspace_root: Path, fix_dir: Path, rerun_command: str
+    ) -> Dict[str, Any]:
+        instructions = [
+            f"cd {workspace_root}",
+            "Open inspection_report.json for analysis and rationale.",
+            "Do NOT edit repository files directly. Stage all changes under fixes/<task_id>/ using agent/ overlays or patch.diff.",
+            "Use input_override.json, problem_statement.txt, or env_override.json if task inputs or env vars must change.",
+            "After preparing the fix package, rerun the debugger using the command below.",
+        ]
+        return {
+            "working_directory": str(workspace_root),
+            "fix_folder": str(fix_dir),
+            "rerun_command": rerun_command,
+            "system_prompt": (
+                "You are a coding agent operating inside hal-harness. Follow the inspection report guidance, "
+                "prepare self-contained fixes under fixes/<task_id>/, and rerun the debugger command to validate. "
+                "Never modify repository files directly."
+            ),
+            "instructions": instructions,
+        }
+
+    def _collect_agent_tree(self, limit: int = 400) -> str:
+        entries: List[str] = []
+        for path in sorted(self.agent_dir.rglob("*")):
+            rel = path.relative_to(self.agent_dir)
+            suffix = "/" if path.is_dir() else ""
+            entries.append(str(rel) + suffix)
+            if len(entries) >= limit:
+                entries.append("... (truncated)")
+                break
+        if not entries:
+            return "(agent directory empty)"
+        return "\n".join(entries)
+
+    def _collect_env_summary(self) -> str:
+        try:
+            env = dotenv_values(".env")
+        except Exception:
+            env = {}
+        if not env:
+            return "No .env file detected or it is empty."
+        lines = []
+        for key in sorted(env.keys()):
+            value = env[key]
+            masked = "***" if value else ""
+            lines.append(f"{key}={masked}")
+        return "\n".join(lines)
+
+    def _describe_agent_tools(self) -> str:
+        return (
+            "HAL generalist agent uses CORE_TOOLS: GoogleSearchTool(provider='serpapi'), "
+            "VisitWebpageTool, PythonInterpreterTool, execute_bash (restricted), "
+            "TextInspectorTool, edit_file, file_content_search, and query_vision_language_model. "
+            "Provide required API keys (e.g., SERPAPI_API_KEY) via env overrides when needed."
+        )
+
+    def _summarize_fix_package(self, fix_package: FixPackage) -> str:
+        parts = []
+        if fix_package.agent_overlay:
+            parts.append(f"overlay: {fix_package.agent_overlay}")
+        if fix_package.agent_patch:
+            parts.append(f"patch: {fix_package.agent_patch.name}")
+        if fix_package.input_override:
+            parts.append(f"input_override keys: {list(fix_package.input_override.keys())}")
+        if fix_package.env_override:
+            parts.append(f"env_override keys: {list(fix_package.env_override.keys())}")
+        if not parts:
+            return "Fix folder present but empty."
+        return "; ".join(parts)
+
+    @staticmethod
+    def _truncate(text: str, limit: int = 4000) -> str:
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "\n... (truncated)"

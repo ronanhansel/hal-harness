@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -36,7 +37,7 @@ def load_agent_args(payload: Optional[str]) -> Optional[Dict[str, Any]]:
     return json.loads(payload)
 
 
-async def _run_pipeline(args: argparse.Namespace) -> None:
+async def _run_pipeline(args: argparse.Namespace, rerun_command: str) -> None:
     LOGGER.info("Loading failures from %s", args.rubrics_csv)
     ingester = LogIngester(args.rubrics_csv, args.traces_dir)
     failures = ingester.get_failing_tasks()
@@ -50,6 +51,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         agent_args=agent_args,
         agent_function=args.agent_function,
         benchmark_name=args.benchmark_name,
+        rerun_command=rerun_command,
     )
     LOGGER.info("Starting debug run for %d task(s)", len(failures))
     await pipeline.run_batch_debug(failures)
@@ -59,7 +61,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     args = parse_args()
-    asyncio.run(_run_pipeline(args))
+    rerun_command = "python scripts/auto_debug_batch.py " + " ".join(sys.argv[1:])
+    asyncio.run(_run_pipeline(args, rerun_command))
 
 
 if __name__ == "__main__":

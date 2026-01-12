@@ -621,3 +621,44 @@ If you use HAL or the HAL harness in your research, please cite it by using the 
   year =         {2025}
 }
 ```
+## Auto Inspector and Fix Workflow
+
+When you run:
+
+```bash
+python scripts/auto_debug_batch.py \
+  --rubrics-csv <path/to/environmental_barrier_rubrics.csv> \
+  --traces-dir <path/to/traces> \
+  --agent-dir agents/hal_generalist_agent \
+  --agent-args agent_args.json \
+  --benchmark-name swebench_verified_mini
+```
+
+the pipeline will:
+
+1. Generate an inspection report for each task under `results/debug_fixes/<task_id>/<run_id>/inspection_report.json`.
+2. Instruct you to create a self-contained fix package inside `fixes/<task_id>/`.
+3. If a fix package exists, automatically rerun the debugger with those overrides applied and log the results next to the inspection report.
+
+### Fix Package Structure
+
+All edits must be captured inside the task-specific directory under `fixes/`. Never edit the agent sources directly. Supported files:
+
+- `agent/` – overlay directory; any files placed here overwrite the agent at rerun time.
+- `patch.diff` – unified diff applied with `patch -p0` before rerunning.
+- `input_override.json` – JSON object merged into the benchmark input.
+- `problem_statement.txt` – plain text replacing the benchmark problem statement.
+- `env_override.json` – JSON object of env vars injected for this rerun only.
+
+Example layout:
+```
+fixes/
+  django__django-12155/
+    agent/
+      main.py
+    patch.diff
+    problem_statement.txt
+    env_override.json
+```
+
+The inspector’s `coding_agent_context` block also includes the working directory, a ready-to-use system prompt, the fix folder path, and the exact `python scripts/auto_debug_batch.py ...` command to rerun after packaging fixes.

@@ -4,9 +4,9 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
     import litellm  # type: ignore
@@ -22,14 +22,19 @@ LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
-class FixSuggestion:
-    fix_type: str  # "code" or "input"
-    content: str
+class InspectionReport:
+    analysis: str
     rationale: str
+    recommended_files: List[str]
+    recommended_actions: List[str]
+    next_steps: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
-class AutoFixer:
-    """Use an LLM to propose an automated remediation for a failed task."""
+class AutoInspector:
+    """LLM-based analyst that produces guidance instead of patches."""
 
     def __init__(
         self,
@@ -40,6 +45,7 @@ class AutoFixer:
         self.agent_dir = Path(agent_dir)
         if not self.agent_dir.exists():
             raise FileNotFoundError(f"Agent directory not found: {self.agent_dir}")
+
         self.model = llm_model or os.getenv("HAL_AUTOFIX_MODEL", "gpt-4o-mini-2024-07-18")
         entrypoint_name = entrypoint or os.getenv("HAL_AUTOFIX_ENTRYPOINT", "main.py")
         self.entrypoint = self.agent_dir / entrypoint_name
@@ -47,36 +53,42 @@ class AutoFixer:
             raise FileNotFoundError(f"Agent entrypoint not found: {self.entrypoint}")
 
         self.system_prompt = (
-            "You are the HAL AutoFixer. "
-            "Given the root-cause analysis from a rubric and the raw error trace "
-            "for a HAL evaluation run, produce a JSON plan that either updates the agent "
-            "code or rewrites the benchmark problem statement. "
-            "ALWAYS treat the rubric explanation as the authoritative diagnosis."
+            "You are the HAL AutoInspector. Given a root-cause explanation and the "
+            "tail of a failing trace, examine the HAL agent source code and produce "
+            "a precise diagnostic for a coding agent to act on. You MUST NOT attempt "
+            "to fix the code yourself. Instead, output guidance that includes:\n"
+            "1) concise analysis of why the run failed,\n"
+            "2) rationale referencing the evidence provided,\n"
+            "3) concrete files or components the coding agent should inspect,\n"
+            "4) recommended actions the coding agent should perform before re-running "
+            "the debugger, and\n"
+            "5) explicit reminder to re-run the debugger after applying changes.\n"
+            "Respond strictly as JSON with the schema provided."
         )
+
         self._openai_client = self._init_openai_client()
 
-    def generate_fix(self, failure_context: Dict[str, Any], log_dir: Optional[Path] = None) -> FixSuggestion:
-        """Call the LLM and parse the structured fix recommendation."""
-        prompt = self._build_prompt(failure_context)
+    def generate_report(
+        self,
+        failure_context: Dict[str, Any],
+        log_dir: Optional[Path] = None,
+        context_blocks: Optional[Sequence[Tuple[str, str]]] = None,
+    ) -> InspectionReport:
+        prompt = self._build_prompt(failure_context, context_blocks or [])
         response_text = self._call_model(prompt)
         try:
-            suggestion = self._parse_response(response_text)
+            report = self._parse_response(response_text)
         except ValueError:
             LOGGER.warning(
-                "AutoFixer produced invalid JSON for task %s; retrying once",
+                "AutoInspector produced invalid JSON for task %s; retrying once",
                 failure_context.get("task_id"),
             )
             self._write_raw_response(log_dir, response_text, attempt=0)
             retry_prompt = self._build_retry_prompt(prompt, response_text)
             response_text = self._call_model(retry_prompt)
-            suggestion = self._parse_response(response_text)
+            report = self._parse_response(response_text)
 
-        LOGGER.info(
-            "AutoFixer selected %s fix for task %s",
-            suggestion.fix_type,
-            failure_context.get("task_id"),
-        )
-        return suggestion
+        return report
 
     def _init_openai_client(self):
         if OpenAI is None:
@@ -91,12 +103,20 @@ class AutoFixer:
         with self.entrypoint.open("r", encoding="utf-8") as handle:
             return handle.read()
 
-    def _build_prompt(self, failure_context: Dict[str, Any]) -> str:
+    def _build_prompt(
+        self,
+        failure_context: Dict[str, Any],
+        context_blocks: Sequence[Tuple[str, str]],
+    ) -> str:
         agent_source = self._load_agent_source()
         explanation = failure_context.get("explanation", "").strip()
         trace_content = failure_context.get("trace_content", "").strip()
 
-        prompt = f"""
+        extra_sections = "\n\n".join(
+            f"[{title.upper()}]\n{body.strip()}" for title, body in context_blocks if body.strip()
+        )
+
+        return f"""
 Task ID: {failure_context.get('task_id') or 'unknown'}
 
 [ROOT CAUSE ANALYSIS]
@@ -105,25 +125,24 @@ Task ID: {failure_context.get('task_id') or 'unknown'}
 [ERROR TRACE TAIL]
 {trace_content or 'Trace missing or empty.'}
 
-[AGENT SOURCE CODE: {self.entrypoint.name}]
+[AGENT SOURCE CODE EXCERPT]
 {agent_source}
 
-Your job is to determine whether the failure can be resolved by modifying the agent code
-or by updating the input/problem statement that will be fed into the agent. Output STRICT JSON
-with this exact schema:
+{extra_sections}
+
+Produce a JSON object with this exact schema:
 {{
-  "fix_type": "code" | "input",
-  "content": "<updated full main.py file or revised problem statement text>",
-  "rationale": "<short justification that cites the rubric explanation>"
+  "analysis": "<concise description of the failure>",
+  "rationale": "<cite the evidence from trace/explanation>",
+  "recommended_files": ["relative/path.py", "..."],
+  "recommended_actions": [
+    "Step-by-step actions a coding agent should perform to fix the issue"
+  ],
+  "next_steps": "Explicit reminder that the coding agent must re-run the HAL debugger after applying fixes."
 }}
 
-Rules:
-1. If the rubric explanation points to tooling limits, sandbox setup, or missing repo files, prefer "code".
-2. If the explanation blames ambiguous task instructions or missing context, prefer "input".
-3. Provide the COMPLETE updated Python file when fix_type is "code".
-4. NEVER include markdown fences or commentary outside the JSON object.
-"""
-        return prompt.strip()
+Do NOT include code patches. Focus on investigative guidance only.
+""".strip()
 
     def _call_model(self, prompt: str) -> str:
         messages = [
@@ -132,11 +151,12 @@ Rules:
         ]
 
         if litellm is not None:
+            temperature = 1 if self._requires_unity_temperature(self.model) else 0
             completion = litellm.completion(
                 model=self.model,
                 messages=messages,
-                temperature=1,
-                max_tokens=6000,
+                temperature=temperature,
+                max_tokens=2048,
             )
             message = completion.choices[0].message
             if isinstance(message, dict):
@@ -144,17 +164,17 @@ Rules:
             return getattr(message, "content", "")
 
         if self._openai_client is not None:
+            temperature = 1 if self._requires_unity_temperature(self.model) else 0
             response = self._openai_client.responses.create(
                 model=self.model,
                 input=messages,
-                temperature=0,
+                temperature=temperature,
                 max_output_tokens=2048,
             )
             output_text = getattr(response, "output_text", None)
             if output_text:
                 return output_text
-            # Fallback to concatenating all output segments.
-            collected = []
+            collected: List[str] = []
             for item in getattr(response, "output", []):
                 content = getattr(item, "content", [])
                 for fragment in content:
@@ -168,23 +188,28 @@ Rules:
             "or set HAL_AUTOFIX_MODEL to a supported provider."
         )
 
-    def _parse_response(self, raw_response: str) -> FixSuggestion:
+    def _parse_response(self, raw_response: str) -> InspectionReport:
         raw_response = raw_response.strip()
         if not raw_response:
-            raise ValueError("AutoFixer returned an empty response")
+            raise ValueError("AutoInspector returned an empty response")
 
         payload = self._extract_json(raw_response)
-        fix_type = (payload.get("fix_type") or "input").strip().lower()
-        if fix_type not in {"code", "input"}:
-            LOGGER.warning("Unknown fix_type '%s'; defaulting to 'input'", fix_type)
-            fix_type = "input"
+        analysis = (payload.get("analysis") or "").strip()
+        rationale = (payload.get("rationale") or "").strip()
+        recommended_files = payload.get("recommended_files") or []
+        recommended_actions = payload.get("recommended_actions") or []
+        next_steps = (payload.get("next_steps") or "").strip()
 
-        content = payload.get("content")
-        rationale = payload.get("rationale", "").strip()
-        if not isinstance(content, str) or not content.strip():
-            raise ValueError("Content missing from AutoFixer response")
+        if not analysis or not rationale:
+            raise ValueError("Missing analysis or rationale in AutoInspector response")
 
-        return FixSuggestion(fix_type=fix_type, content=content, rationale=rationale)
+        return InspectionReport(
+            analysis=analysis,
+            rationale=rationale,
+            recommended_files=list(recommended_files),
+            recommended_actions=list(recommended_actions),
+            next_steps=next_steps,
+        )
 
     @staticmethod
     def _extract_json(response_text: str) -> Dict[str, Any]:
@@ -209,12 +234,21 @@ Rules:
         )
 
     @staticmethod
-    def _write_raw_response(log_dir: Optional[Path], content: str, attempt: int) -> None:
+    def _write_raw_response(
+        log_dir: Optional[Path],
+        content: str,
+        attempt: int,
+    ) -> None:
         if not log_dir:
             return
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
-            filename = log_dir / f"autofixer_response_attempt_{attempt}.txt"
+            filename = log_dir / f"autoinspector_response_attempt_{attempt}.txt"
             filename.write_text(content, encoding="utf-8")
         except Exception as exc:  # pragma: no cover
-            LOGGER.debug("Failed to write autofixer raw response: %s", exc)
+            LOGGER.debug("Failed to write autoinspector raw response: %s", exc)
+
+    @staticmethod
+    def _requires_unity_temperature(model_name: str) -> bool:
+        normalized = model_name.split("/")[-1]
+        return normalized.startswith("o3") or normalized.startswith("o4") or "o-" in normalized

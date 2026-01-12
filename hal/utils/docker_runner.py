@@ -100,7 +100,8 @@ class DockerRunner:
                        benchmark: Optional[BaseBenchmark] = None,
                        progress: Optional[Progress] = None,
                        task: Optional[TaskID] = None,
-                       timeout: int = 7200) -> Dict[str, Any]:
+                       timeout: int = 7200,
+                       task_env_overrides: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, Any]:
         """
         Run agent on all tasks with concurrency control
         """
@@ -122,7 +123,8 @@ class DockerRunner:
                     run_id=run_id,
                     submissions_file=submissions_file,
                     progress=progress,
-                    task=task
+                    task=task,
+                    env_override=(task_env_overrides or {}).get(task_id)
                 )
                 tasks.append(task_coro)
             
@@ -156,7 +158,8 @@ class DockerRunner:
                           run_id: str,
                           submissions_file: str,
                           progress: Optional[Progress] = None,
-                          task: Optional[TaskID] = None) -> Optional[Dict[str, Any]]:
+                          task: Optional[TaskID] = None,
+                          env_override: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
         """Process a single task with semaphore control"""
         async with self._semaphore:
             verbose_logger.debug(f"Starting task {task_id} (active tasks: {self.max_concurrent - self._semaphore._value})")
@@ -166,7 +169,8 @@ class DockerRunner:
                 agent_function=agent_function,
                 agent_dir=agent_dir,
                 agent_args=agent_args,
-                run_id=run_id
+                run_id=run_id,
+                env_override=env_override
             )
             
             # Write result to submissions file
@@ -190,7 +194,8 @@ class DockerRunner:
                              agent_dir: str,
                              agent_args: Dict[str, Any],
                              run_id: str,
-                             timeout: int = 7200) -> Optional[Dict[str, Any]]:
+                             timeout: int = 7200,
+                             env_override: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
         """Process a single task in a Docker container with timeout"""
         # Create temporary directory for mounting into container
         temp_dir = Path(tempfile.mkdtemp())
@@ -340,6 +345,8 @@ class DockerRunner:
         
             # get env vars from .env file
             env_vars = dotenv_values(".env")
+            if env_override:
+                env_vars.update(env_override)
             env_vars_str = " ".join([f"{k}={v}" for k, v in env_vars.items()])
             print(f"Running script with env: {env_vars_str}")
             
