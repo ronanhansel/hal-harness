@@ -728,16 +728,17 @@ python scripts/auto_debug_batch.py \
 
 the pipeline will:
 
-1. Load **every** CSV under `../fixable_output` (or the legacy `--rubrics-csv`) and write `debug/fixable_summary.json`, which lists each task flagged with `grade > 0` along with its explanation, source CSV, and criterion so you can see every “score = 1” issue at a glance.
-2. Generate an inspection report per task under `debug/<task_id>/<run_id>/inspection_report.json`, including rich context (task input, env vars, agent tree, tool description, prior rerun output) plus a `coding_agent_context` block the fixer agent can paste directly into its system prompt. This block now lists both the full rerun command and a single-task command that appends `--task-id <task_id>` so coding agents can iterate quickly.
-3. Instruct you to create a self-contained fix package inside `fixes/<task_id>/`.
-4. If a fix package exists, automatically rerun the debugger with those overrides applied and log the results (including a `post_rerun_report.json`) next to the inspection report.
+1. Load **every** CSV under `../fixable_output` (or the legacy `--rubrics-csv`) and write `debug/rubric_summary.json`, which lists each task flagged with `grade > 0` along with its explanation, source CSV, and criterion so you can see every “score = 1” issue at a glance.
+2. Run the AutoInspector to generate reports under `debug/<task_id>/<run_id>/inspection_report.json`, including rich context (task input, env vars, agent tree, tool description) plus a `coding_agent_context` block the fixer agent can paste directly into its system prompt. This block lists both the full rerun command and a single-task command that appends `--task-id <task_id>` so coding agents can iterate quickly.
+3. After reviewing the report, create or update the self-contained fix package inside `fixes/<task_id>/`.
+4. Switch to `--mode run` (or call `python main.py debug --debug-mode run ...`) to apply those fixes. The runner executes the agent in Docker, writes `rerun_results.json`, and emits synthetic traces at `../traces/debug_runs/<run_id>.json` plus per-task `verbose.log` files so you can immediately re-run the rubric evaluator in `--output-mode stdout` for just the rerun output.
+5. Every debugger invocation logs into `log/pipeline-run-<timestamp>`, making it easy to bundle the entire terminal-based Codex session for later triage.
 
 ### Fix Package Structure
 
 All edits must be captured inside the task-specific directory under `fixes/`. Never edit the agent sources directly. Supported files:
 
-- `agent/` – overlay directory; any files placed here overwrite the agent at rerun time.
+- `agent/` – overlay directory; any files placed here overwrite the agent at rerun time. **Preferred:** drop the fully edited file(s) here so reruns operate on exactly what you expect.
 - `patch.diff` – unified diff applied with `patch -p0` before rerunning.
 - `input_override.json` – JSON object merged into the benchmark input.
 - `problem_statement.txt` – plain text replacing the benchmark problem statement.
@@ -757,4 +758,4 @@ fixes/
 
 The inspector’s `coding_agent_context` block also includes the working directory, a ready-to-use system prompt, the fix folder path, and the exact `python scripts/auto_debug_batch.py ...` command to rerun after packaging fixes.
 
-**Important:** fixes must always be self-contained inside `fixes/<task_id>/`. Overlays under `agent/` or `patch.diff` are copied into a temporary workspace right before rerunning, so the original agent sources remain untouched. This keeps the repository clean while still allowing arbitrarily complex patches, env overrides, or prompt changes through `input_override.json`. When iterating, prefer the inspector-provided single-task command (`... --task-id <task_id>`) so you only rerun the rubric under active investigation before falling back to the full batch rerun.
+**Important:** fixes must always be self-contained inside `fixes/<task_id>/`. Overlays under `agent/` (recommended) or `patch.diff` are copied into a temporary workspace right before rerunning, so the original agent sources remain untouched. This keeps the repository clean while still allowing arbitrarily complex patches, env overrides, or prompt changes through `input_override.json`. Because the runner now emits synthetic traces for each rerun, you can quickly re-run the rubric evaluator in “stdout mode” against `../traces/debug_runs/<run_id>.json` to confirm that the environment/input fixes resolved the rubric without overwriting the canonical CSVs. When iterating, prefer the inspector-provided single-task command (`... --task-id <task_id>`) so you only rerun the rubric under active investigation before falling back to the full batch rerun.

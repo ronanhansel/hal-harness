@@ -33,12 +33,27 @@ class FixPackage:
         return not (self.has_agent_changes or self.has_input_override or self.has_env_override)
 
 
-def load_fix_package(task_id: str, fixes_root: Path | str = "fixes") -> Optional[FixPackage]:
-    fixes_root = Path(fixes_root)
-    task_root = fixes_root / task_id
-    if not task_root.exists():
-        return None
+def load_fix_package(
+    task_id: str,
+    fixes_root: Path | str = "fixes",
+    benchmark: str | None = None,
+) -> Optional[FixPackage]:
+    fixes_root = Path(fixes_root).expanduser().resolve()
+    candidates = []
+    if benchmark:
+        benchmark_slug = _sanitize_component(benchmark)
+        candidates.append(fixes_root / benchmark_slug / task_id)
+    candidates.append(fixes_root / task_id)
 
+    for task_root in candidates:
+        task_root = task_root.resolve()
+        if task_root.exists():
+            package = _build_package(task_root)
+            if package is not None:
+                return package
+    return None
+
+def _build_package(task_root: Path) -> Optional[FixPackage]:
     agent_overlay = task_root / "agent"
     if not agent_overlay.exists():
         agent_overlay = None
@@ -81,7 +96,7 @@ def apply_agent_overlay(base_agent_dir: Path, overlay_dir: Path) -> None:
 
 def apply_agent_patch(base_agent_dir: Path, patch_file: Path) -> None:
     proc = subprocess.run(
-        ["patch", "-p0", "-i", str(patch_file)],
+        ["patch", "-p0", "--batch", "-i", str(patch_file)],
         cwd=base_agent_dir,
         capture_output=True,
         text=True,
@@ -97,3 +112,7 @@ def _load_json(path: Path) -> Optional[Dict[str, object]]:
         return None
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _sanitize_component(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in value)

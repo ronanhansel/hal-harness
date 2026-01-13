@@ -41,6 +41,7 @@ class AutoInspector:
         agent_dir: str | os.PathLike[str],
         llm_model: str | None = None,
         entrypoint: str | None = None,
+        reasoning_effort: Optional[str] = None,
     ) -> None:
         self.agent_dir = Path(agent_dir)
         if not self.agent_dir.exists():
@@ -51,6 +52,13 @@ class AutoInspector:
         self.entrypoint = self.agent_dir / entrypoint_name
         if not self.entrypoint.exists():
             raise FileNotFoundError(f"Agent entrypoint not found: {self.entrypoint}")
+        if reasoning_effort:
+            normalized_effort = reasoning_effort.lower()
+            if normalized_effort not in {"low", "medium", "high"}:
+                raise ValueError("reasoning_effort must be one of: low, medium, high.")
+            self.reasoning_effort = normalized_effort
+        else:
+            self.reasoning_effort = None
 
         self.system_prompt = (
             "You are the HAL AutoInspector. Given a root-cause explanation and the "
@@ -157,6 +165,7 @@ Do NOT include code patches. Focus on investigative guidance only.
                 messages=messages,
                 temperature=temperature,
                 max_tokens=2048,
+                reasoning_effort=self.reasoning_effort,
             )
             message = completion.choices[0].message
             if isinstance(message, dict):
@@ -165,11 +174,16 @@ Do NOT include code patches. Focus on investigative guidance only.
 
         if self._openai_client is not None:
             temperature = 1 if self._requires_unity_temperature(self.model) else 0
+            kwargs = {
+                "model": self.model,
+                "input": messages,
+                "temperature": temperature,
+                "max_output_tokens": 2048,
+            }
+            if self.reasoning_effort:
+                kwargs["reasoning"] = {"effort": self.reasoning_effort}
             response = self._openai_client.responses.create(
-                model=self.model,
-                input=messages,
-                temperature=temperature,
-                max_output_tokens=2048,
+                **kwargs,
             )
             output_text = getattr(response, "output_text", None)
             if output_text:

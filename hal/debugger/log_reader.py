@@ -69,9 +69,17 @@ class LogIngester:
         return grade > 0
 
     def _load_trace_tail(self, model_run: str, task_id: str) -> str:
-        trace_path = self.traces_root_dir / model_run / task_id / "verbose.log"
-        if not trace_path.exists():
-            LOGGER.warning("Trace file missing for run=%s task=%s (%s)", model_run, task_id, trace_path)
+        candidates = [
+            self.traces_root_dir / model_run / task_id / "verbose.log",
+            self.traces_root_dir / "debug_runs" / model_run / task_id / "verbose.log",
+        ]
+        trace_path = None
+        for candidate in candidates:
+            if candidate.exists():
+                trace_path = candidate
+                break
+        if trace_path is None:
+            LOGGER.warning("Trace file missing for run=%s task=%s (searched %s)", model_run, task_id, candidates[0].parent)
             return ""
 
         with trace_path.open("rb") as handle:
