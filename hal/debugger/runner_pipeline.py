@@ -73,7 +73,7 @@ class RunnerPipeline(PipelineBase):
         else:
             run_id = f"debug_{sanitized_id}_{int(time.time())}"
             task_run_dir = self._get_task_run_dir(task_id, run_id)
-        trace_label = self._derive_trace_label(failure_item)
+        trace_label = self._derive_trace_label(failure_item, task_id)
 
         fix_package = load_fix_package(sanitized_id, self.fixes_root, self.benchmark_name)
         if not fix_package:
@@ -177,12 +177,15 @@ class RunnerPipeline(PipelineBase):
 
         return temp_dir
 
-    @staticmethod
-    def _derive_trace_label(failure_item: Dict[str, Any]) -> Optional[str]:
+    def _derive_trace_label(self, failure_item: Dict[str, Any], task_id: str) -> str:
         source = failure_item.get("_source_csv")
-        if not source:
-            return None
-        return Path(source).stem
+        if source:
+            return Path(source).stem
+        benchmark_slug = self._sanitize_task_id(self.benchmark_name)
+        task_slug = self._sanitize_task_id(task_id or "task")
+        model_name = str(self.agent_args.get("model_name") or "model")
+        model_slug = self._sanitize_task_id(model_name)
+        return f"debug_{benchmark_slug}_{task_slug}_{model_slug}"
 
     @staticmethod
     def _rerun_successful(task_id: str, rerun_output: Dict[str, Any]) -> bool:
