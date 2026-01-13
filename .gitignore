@@ -32,3 +32,4 @@ agents/USACO/data/.DS_Store
 # Claude Code settings
 .claude/settings.local.json
 debug/
+.DS_Store
