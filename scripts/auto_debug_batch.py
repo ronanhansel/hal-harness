@@ -8,7 +8,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from hal.debugger.inspector_pipeline import InspectorPipeline
 from hal.debugger.log_reader import LogIngester
@@ -166,6 +166,76 @@ def _log_failure_summary(items: List[Dict[str, Any]], sources: List[Path | str])
     if grade_one:
         LOGGER.info("Grade=1.0 task_ids: %s", ", ".join(sorted(set(filter(None, grade_one)))))
 
+
+def _group_failures(failures: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
+    grouped: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for failure in failures:
+        task_id = failure.get("task_id")
+        criteria = failure.get("criteria") or "environmental_barrier"
+        if not task_id:
+            continue
+        key = (task_id, criteria)
+        entry = grouped.setdefault(
+            key,
+            {
+                "task_id": task_id,
+                "criteria": criteria,
+                "grade": 0.0,
+                "grade_raw_values": set(),
+                "explanations": [],
+                "trace_contents": [],
+                "model_runs": set(),
+                "source_csvs": set(),
+                "occurrences": 0,
+            },
+        )
+        grade_numeric = failure.get("grade_numeric")
+        if grade_numeric is None:
+            try:
+                grade_numeric = float(failure.get("grade") or 0)
+            except (TypeError, ValueError):
+                grade_numeric = 0.0
+        entry["grade"] = max(entry["grade"], grade_numeric or 0.0)
+        grade_raw = failure.get("grade")
+        if grade_raw:
+            entry["grade_raw_values"].add(str(grade_raw))
+        explanation = (failure.get("explanation") or "").strip()
+        if explanation:
+            entry["explanations"].append(explanation)
+        trace_content = (failure.get("trace_content") or "").strip()
+        if trace_content:
+            entry["trace_contents"].append(trace_content)
+        model_run = failure.get("model_run")
+        if model_run:
+            entry["model_runs"].add(model_run)
+        source_csv = failure.get("_source_csv") or failure.get("source_csv")
+        if source_csv:
+            entry["source_csvs"].add(str(source_csv))
+        entry["occurrences"] += 1
+
+    aggregated: List[Dict[str, Any]] = []
+    for value in grouped.values():
+        aggregated.append(
+            {
+                "task_id": value["task_id"],
+                "criteria": value["criteria"],
+                "grade": value["grade"],
+                "grade_numeric": value["grade"],
+                "grade_raw": ", ".join(sorted(value["grade_raw_values"])) if value["grade_raw_values"] else "",
+                "explanation": "\n\n---\n\n".join(value["explanations"]) if value["explanations"] else "",
+                "explanations": value["explanations"],
+                "trace_content": "\n\n---\n\n".join(value["trace_contents"]) if value["trace_contents"] else "",
+                "trace_contents": value["trace_contents"],
+                "model_run": ", ".join(sorted(value["model_runs"])),
+                "model_runs": sorted(value["model_runs"]),
+                "_source_csv": ", ".join(sorted(value["source_csvs"])),
+                "source_csvs": sorted(value["source_csvs"]),
+                "occurrences": value["occurrences"],
+            }
+        )
+    aggregated.sort(key=lambda item: (item.get("task_id") or "", item.get("criteria") or ""))
+    return aggregated, len(failures)
+
 def _resolve_path(value: str | os.PathLike[str]) -> Path:
     path = Path(value)
     if path.is_absolute():
@@ -201,9 +271,13 @@ def _build_pipeline(args: argparse.Namespace, agent_args: Optional[Dict[str, Any
 
 
 async def _run_pipeline(args: argparse.Namespace, rerun_command: str) -> None:
-    failures, sources = load_failures(args)
+    raw_failures, sources = load_failures(args)
+    grouped_failures, raw_count = _group_failures(raw_failures)
     pipeline_logger = PipelineRunLogger()
-    pipeline_logger.log(f"Mode={args.mode}, requested_tasks={len(args.task_ids or [])}, loaded_tasks={len(failures)}")
+    pipeline_logger.log(
+        f"Mode={args.mode}, requested_tasks={len(args.task_ids or [])}, "
+        f"loaded_tasks={len(grouped_failures)} (raw_rows={raw_count})"
+    )
 
     agent_args = load_agent_args(args.agent_args)
     pipeline = _build_pipeline(args, agent_args, rerun_command)
@@ -214,21 +288,21 @@ async def _run_pipeline(args: argparse.Namespace, rerun_command: str) -> None:
         summary_root = pipeline.results_root
     summary_root.mkdir(parents=True, exist_ok=True)
     summary_path = summary_root / "rubric_summary.json"
-    write_rubric_summary(failures, summary_path)
-    _log_failure_summary(failures, sources)
+    write_rubric_summary(grouped_failures, summary_path)
+    _log_failure_summary(grouped_failures, sources)
     LOGGER.info("Wrote rubric summary to %s", summary_path)
     pipeline_logger.log(f"Rubric summary updated at {summary_path}")
 
-    if not failures:
+    if not grouped_failures:
         LOGGER.info("No rubric entries detected. Nothing to process.")
         pipeline_logger.log("No rubric entries detected; exiting.")
         pipeline_logger.finish()
         print(f"Pipeline logs: {pipeline_logger.root}")
         return
 
-    LOGGER.info("Starting %s pipeline for %d task(s)", args.mode, len(failures))
-    pipeline_logger.log(f"Starting {args.mode} pipeline for {len(failures)} task(s).")
-    await pipeline.run_batch(failures)
+    LOGGER.info("Starting %s pipeline for %d task(s)", args.mode, len(grouped_failures))
+    pipeline_logger.log(f"Starting {args.mode} pipeline for {len(grouped_failures)} task(s).")
+    await pipeline.run_batch(grouped_failures)
     LOGGER.info("Debug run complete")
     pipeline_logger.log("Pipeline run complete.")
     pipeline_logger.finish()
@@ -236,31 +310,10 @@ async def _run_pipeline(args: argparse.Namespace, rerun_command: str) -> None:
 
 
 def write_rubric_summary(failures: List[Dict[str, Any]], output_path: Path) -> None:
-    payload_tasks: List[Dict[str, Any]] = []
-    for failure in failures:
-        grade_numeric = failure.get("grade_numeric")
-        if grade_numeric is None:
-            try:
-                grade_numeric = float(failure.get("grade") or 0)
-            except (TypeError, ValueError):
-                grade_numeric = 0.0
-
-        payload_tasks.append(
-            {
-                "task_id": failure.get("task_id"),
-                "criteria": failure.get("criteria"),
-                "grade": grade_numeric,
-                "grade_raw": failure.get("grade"),
-                "explanation": failure.get("explanation"),
-                "source_csv": failure.get("_source_csv"),
-                "model_run": failure.get("model_run"),
-            }
-        )
-
-    payload_tasks.sort(key=lambda item: (item.get("task_id") or "", item.get("criteria") or ""))
+    payload_tasks = sorted(failures, key=lambda item: (item.get("task_id") or "", item.get("criteria") or ""))
     summary = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "total_tasks": len(failures),
+        "total_tasks": len(payload_tasks),
         "grade_one_tasks": [
             task["task_id"] for task in payload_tasks if task.get("grade") == 1.0 and task.get("task_id")
         ],
