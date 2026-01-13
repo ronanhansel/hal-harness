@@ -92,8 +92,12 @@ class BaseBenchmark(ABC):
                     task_metrics[task_id] = task_data["metrics"]
 
         # Get cost and usage metrics
-        total_cost, total_usage = get_total_cost(weave_client)
-        raw_logging, latency_dict = get_weave_calls(weave_client)
+        if weave_client is not None:
+            total_cost, total_usage = get_total_cost(weave_client)
+            raw_logging, latency_dict = get_weave_calls(weave_client)
+        else:
+            total_cost, total_usage = 0.0, {}
+            raw_logging, latency_dict = [], {}
 
         # Prepare results summary
         results_summary = {
@@ -143,6 +147,5 @@ class BaseBenchmark(ABC):
     def upload_results(self, run_id: str, results: Dict[str, Any]):
         """Upload results to storage. Override if needed."""
         pass
-
 
 

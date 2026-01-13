@@ -24,8 +24,8 @@ ENV PATH /opt/conda/bin:$PATH
 # Provide a harmless default for optional API-based tools
 ENV SERPAPI_API_KEY=dummy-serpapi-key
 
-# Install weave and pin gql < 4
-RUN pip install weave==0.51.41 "gql<4"
+# Install weave and pin gql < 4, plus wandb version compatible with weave tracing
+RUN pip install weave==0.51.41 "gql<4" wandb==0.17.9
 
 # Set working directory
 WORKDIR /workspace

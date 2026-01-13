@@ -159,7 +159,11 @@ class AgentRunner:
         
         # Initialize logging for main run
         print_step("Initializing logging with W&B Weave...")
-        weave_client = weave.init(self.run_id)
+        weave_client = None
+        try:
+            weave_client = weave.init(self.run_id)
+        except Exception as exc:
+            print_warning(f"Failed to initialize Weave (continuing without traces): {exc}")
         
         # Get dataset and filter for remaining tasks if continuing
         dataset = self.benchmark.get_dataset()
@@ -175,7 +179,7 @@ class AgentRunner:
             dataset = {task_id: dataset[task_id] for task_id in task_ids}
             
         # delete previous calls from previous run if continuing for remaining tasks
-        if self.continue_run and not self.ignore_errors:
+        if weave_client and self.continue_run and not self.ignore_errors:
             print_step("Cleaning up calls from previous run...")
             for task_id in dataset:
                 call_ids = get_call_ids(task_id, weave_client)
@@ -255,7 +259,8 @@ class AgentRunner:
             # sys.exit(1)
             
         # stop weave logging before harness is run to avoid lm as judge to produce additional cost 
-        weave.finish()
+        if weave_client:
+            weave.finish()
         
         if is_inspect_benchmark(self.benchmark.benchmark_name):
             eval_results = await self.benchmark.evaluate_output(agent_output, self.run_id)

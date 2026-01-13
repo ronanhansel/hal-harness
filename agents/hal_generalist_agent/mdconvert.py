@@ -17,7 +17,11 @@ import zipfile
 from typing import Any, Dict, List, Optional, Union
 from urllib.parse import parse_qs, quote, unquote, urlparse, urlunparse
 
-import mammoth
+try:
+    import mammoth  # type: ignore
+except ModuleNotFoundError:
+    mammoth = None  # type: ignore
+
 import markdownify
 import pandas as pd
 import pdfminer
@@ -380,6 +384,8 @@ class DocxConverter(HtmlConverter):
             return None
 
         result = None
+        if mammoth is None:
+            raise RuntimeError("mammoth is required to convert DOCX files but is not installed.")
         with open(local_path, "rb") as docx_file:
             result = mammoth.convert_to_html(docx_file)
             html_content = result.value

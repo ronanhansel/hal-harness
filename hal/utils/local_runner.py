@@ -281,8 +281,22 @@ class LocalRunner:
 import os
 import json
 import importlib.util
-import weave
 import traceback
+import contextlib
+
+try:
+    import weave  # type: ignore
+except Exception:  # pragma: no cover - weave optional
+    class _WeaveStub:
+        def init(self, *_args, **_kwargs):
+            return None
+
+        def attributes(self, *_args, **_kwargs):
+            return contextlib.nullcontext()
+
+        def finish(self):
+            pass
+    weave = _WeaveStub()
 
 try:
     # Initialize weave

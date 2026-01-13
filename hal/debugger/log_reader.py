@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import os
 from pathlib import Path
@@ -79,7 +80,15 @@ class LogIngester:
                 trace_path = candidate
                 break
         if trace_path is None:
-            LOGGER.warning("Trace file missing for run=%s task=%s (searched %s)", model_run, task_id, candidates[0].parent)
+            fallback = self._load_from_trace_json(model_run, task_id)
+            if fallback:
+                return fallback
+            LOGGER.warning(
+                "Trace file missing for run=%s task=%s (searched %s)",
+                model_run,
+                task_id,
+                candidates[0].parent,
+            )
             return ""
 
         with trace_path.open("rb") as handle:
@@ -94,6 +103,46 @@ class LogIngester:
             if newline_idx != -1:
                 snippet = snippet[newline_idx + 1 :]
         return snippet.strip()
+
+    def _load_from_trace_json(self, model_run: str, task_id: str) -> str:
+        trace_json = self.traces_root_dir / f"{model_run}.json"
+        if not trace_json.exists():
+            trace_json = self.traces_root_dir / "debug_runs" / f"{model_run}.json"
+        if not trace_json.exists():
+            return ""
+        try:
+            data = json.loads(trace_json.read_text(encoding="utf-8"))
+        except Exception:
+            return ""
+
+        raw_entries = data.get("raw_logging_results") or []
+        filtered = [
+            entry for entry in raw_entries
+            if self._entry_matches_task(entry, task_id)
+        ]
+        if not filtered:
+            return ""
+        latest = filtered[-1]
+        message = latest.get("output", {}).get("choices") or []
+        if message:
+            choice = message[-1]
+            content = choice.get("message") or {}
+            text = content.get("content")
+            if isinstance(text, str):
+                return text.strip()
+        output_text = latest.get("output_text")
+        if isinstance(output_text, str):
+            return output_text.strip()
+        return ""
+
+    @staticmethod
+    def _entry_matches_task(entry: Dict[str, Any], task_id: str) -> bool:
+        attributes = entry.get("attributes") or {}
+        return (
+            attributes.get("weave_task_id") == task_id
+            or entry.get("weave_task_id") == task_id
+            or entry.get("inputs", {}).get("task_id") == task_id
+        )
 
     def _parse_grade(self, grade_raw: Optional[str]) -> float:
         grade_str = (grade_raw or "0").strip()

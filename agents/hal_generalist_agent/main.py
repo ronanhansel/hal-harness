@@ -1,16 +1,50 @@
 
 from typing import Optional, List, Dict, Any
 from functools import partial
-import tiktoken
 
 import subprocess
 from pathlib import Path
 import re
+import sys
+import inspect
 
 import json
 import os
+import types
 
 from typing import Optional
+
+try:
+    import tiktoken  # type: ignore
+except ModuleNotFoundError:
+    class _SimpleEncoding:
+        def encode(self, text: str):
+            return text.encode("utf-8", errors="ignore")
+
+        def decode(self, token_bytes):
+            if isinstance(token_bytes, (bytes, bytearray)):
+                return token_bytes.decode("utf-8", errors="ignore")
+            if isinstance(token_bytes, list):
+                return bytes(token_bytes).decode("utf-8", errors="ignore")
+            return str(token_bytes)
+
+    _simple_encoding = _SimpleEncoding()
+    tiktoken = types.SimpleNamespace(get_encoding=lambda _name: _simple_encoding)  # type: ignore
+
+
+def _ensure_smolagents_importable() -> None:
+    """Allow running without pip-installing smolagents by adding the bundled copy."""
+    try:
+        import smolagents  # type: ignore
+        return
+    except ModuleNotFoundError:
+        pass
+    fallback = Path(__file__).resolve().parents[2] / "open_deep_research" / "src"
+    if fallback.exists():
+        if str(fallback) not in sys.path:
+            sys.path.append(str(fallback))
+
+_ensure_smolagents_importable()
 
 from smolagents import CodeAgent, tool, LiteLLMModel, Tool, PythonInterpreterTool, VisitWebpageTool, GoogleSearchTool
 from smolagents.models import MessageRole, Model
@@ -34,7 +68,24 @@ def supports_stop_parameter(model_id: str) -> bool:
 # Replace the function in smolagents
 smolagents.models.supports_stop_parameter = supports_stop_parameter
 
-from mdconvert import MarkdownConverter
+try:
+    from mdconvert import MarkdownConverter  # type: ignore
+except Exception as exc:  # pragma: no cover - fallback when optional deps missing
+    class MarkdownConverter:  # type: ignore
+        """Minimal fallback converter when mdconvert dependencies are unavailable."""
+
+        class _Result:
+            def __init__(self, title: Optional[str], text_content: str):
+                self.title = title
+                self.text_content = text_content
+
+        def convert(self, local_path: str, **_kwargs: Any) -> "MarkdownConverter._Result":
+            try:
+                with open(local_path, "r", encoding="utf-8", errors="ignore") as handle:
+                    content = handle.read()
+            except Exception as read_err:
+                content = f"[mdconvert unavailable: {read_err}]"
+            return MarkdownConverter._Result(title=os.path.basename(local_path), text_content=content)
 
 try:
     from hal.utils.weave_utils import MODEL_PRICES_DICT
@@ -130,6 +181,14 @@ def check_budget_exceeded(agent: CodeAgent, budget: float, model_name: str) -> b
     if cost >= budget:
         return True
     return False
+
+CODE_AGENT_SUPPORTS_BUDGET_CB = "budget_exceeded_callback" in inspect.signature(CodeAgent.__init__).parameters
+
+def maybe_add_budget_callback(agent_kwargs: Dict[str, Any], budget: Optional[float], model_name: str) -> None:
+    if budget and CODE_AGENT_SUPPORTS_BUDGET_CB:
+        agent_kwargs["budget_exceeded_callback"] = partial(
+            check_budget_exceeded, budget=budget, model_name=model_name
+        )
 
 class TextInspectorTool(Tool):
     name = "inspect_file_as_text"
@@ -737,13 +796,15 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
         query_vision_language_model,
     ]
 
-    agent = CodeAgent(
-    tools=CORE_TOOLS,
-    planning_interval=4,
-    max_steps=200,
-    additional_authorized_imports=AUTHORIZED_IMPORTS,
-    budget_exceeded_callback=partial(check_budget_exceeded, budget=BUDGET, model_name=kwargs['model_name']) if BUDGET else None,
-    model=model)
+    agent_kwargs = dict(
+        tools=CORE_TOOLS,
+        planning_interval=4,
+        max_steps=200,
+        additional_authorized_imports=AUTHORIZED_IMPORTS,
+        model=model,
+    )
+    maybe_add_budget_callback(agent_kwargs, BUDGET, kwargs['model_name'])
+    agent = CodeAgent(**agent_kwargs)
     agent.python_executor.state["__name__"] = "__main__"
 
     if kwargs['benchmark_name'] == 'usaco':
@@ -779,43 +840,46 @@ No outside libraries are allowed.
             
     elif kwargs['benchmark_name'] == 'corebench_easy':
         # Create a new agent with more steps specifically for CoreBench easy
-        corebench_agent = CodeAgent(
+        agent_kwargs = dict(
             tools=CORE_TOOLS,
             planning_interval=4,
             max_steps=40,
-            budget_exceeded_callback=partial(check_budget_exceeded, budget=BUDGET, model_name=kwargs['model_name']) if BUDGET else None,
-            model=model
+            model=model,
         )
-        
-        response = corebench_agent.run(task['prompt'])
+        maybe_add_budget_callback(agent_kwargs, BUDGET, kwargs['model_name'])
+        corebench_agent = CodeAgent(**agent_kwargs)
+        corebench_prompt = task.get('prompt') or task.get('problem_statement') or task.get('task_prompt')
+        response = corebench_agent.run(corebench_prompt)
         save_agent_steps(corebench_agent, kwargs, response, task)
         return {task_id: response}
 
     elif kwargs['benchmark_name'] == 'corebench_medium':
         # Create a new agent with more steps specifically for CoreBench medium
-        corebench_agent = CodeAgent(
+        agent_kwargs = dict(
             tools=CORE_TOOLS,
             planning_interval=4,
             max_steps=40,
-            budget_exceeded_callback=partial(check_budget_exceeded, budget=BUDGET, model_name=kwargs['model_name']) if BUDGET else None,
-            model=model
+            model=model,
         )
-        
-        response = corebench_agent.run(task['prompt'])
+        maybe_add_budget_callback(agent_kwargs, BUDGET, kwargs['model_name'])
+        corebench_agent = CodeAgent(**agent_kwargs)
+        corebench_prompt = task.get('prompt') or task.get('problem_statement') or task.get('task_prompt')
+        response = corebench_agent.run(corebench_prompt)
         save_agent_steps(corebench_agent, kwargs, response, task)
         return {task_id: response}
     
     elif kwargs['benchmark_name'] == 'corebench_hard':
         # Create a new agent with more steps specifically for CoreBench hard
-        corebench_agent = CodeAgent(
+        agent_kwargs = dict(
             tools=CORE_TOOLS,
             planning_interval=4,
             max_steps=40,
-            budget_exceeded_callback=partial(check_budget_exceeded, budget=BUDGET, model_name=kwargs['model_name']) if BUDGET else None,
-            model=model
+            model=model,
         )
-        
-        response = corebench_agent.run(task['prompt'])
+        maybe_add_budget_callback(agent_kwargs, BUDGET, kwargs['model_name'])
+        corebench_agent = CodeAgent(**agent_kwargs)
+        corebench_prompt = task.get('prompt') or task.get('problem_statement') or task.get('task_prompt')
+        response = corebench_agent.run(corebench_prompt)
         save_agent_steps(corebench_agent, kwargs, response, task)
         return {task_id: response}
     
@@ -974,13 +1038,15 @@ Task:
                 """
                 return world.execute(code), "Task completed" if world.task_completed() else "Task not yet completed"
             
-            agent = CodeAgent(
+            agent_kwargs = dict(
                 tools=CORE_TOOLS + get_smolagents_tools(world.task),
                 planning_interval=4,
                 max_steps=200,
                 additional_authorized_imports=AUTHORIZED_IMPORTS,
-                budget_exceeded_callback=partial(check_budget_exceeded, budget=BUDGET, model_name=kwargs['model_name']) if BUDGET else None,
-                model=model)
+                model=model,
+            )
+            maybe_add_budget_callback(agent_kwargs, BUDGET, kwargs['model_name'])
+            agent = CodeAgent(**agent_kwargs)
             agent.python_executor.state["__name__"] = "__main__"
             
             response = agent.run(prompt)
@@ -1006,13 +1072,15 @@ Task:
             """
             return world.execute(code), "Task completed" if world.task_completed() else "Task not yet completed"
         
-        agent = CodeAgent(
+        agent_kwargs = dict(
             tools=CORE_TOOLS + [execute_code_to_interact_with_apis],
             planning_interval=4,
             max_steps=200,
             additional_authorized_imports=AUTHORIZED_IMPORTS,
-            budget_exceeded_callback=partial(check_budget_exceeded, budget=BUDGET, model_name=kwargs['model_name']) if BUDGET else None,
-            model=model)
+            model=model,
+        )
+        maybe_add_budget_callback(agent_kwargs, BUDGET, kwargs['model_name'])
+        agent = CodeAgent(**agent_kwargs)
         agent.python_executor.state["__name__"] = "__main__"
         
         with AppWorld(task_id=task_id, experiment_name="output", remote_environment_url="http://0.0.0.0:8001") as world:
@@ -1116,11 +1184,14 @@ Here is the question and attached files are stored in your current directory:
             observation, _, _ = isolated_env.step("I WANT TO ANSWER:" + answer)
             return "The task is finished. And your answer is received.", "Task finished" 
         
-        agent = CodeAgent(
+        agent_kwargs = dict(
             tools=CORE_TOOLS + [ask_user, finish_task],
             planning_interval=4,
             max_steps=80,
-            model=model)
+            model=model,
+        )
+        maybe_add_budget_callback(agent_kwargs, BUDGET, kwargs['model_name'])
+        agent = CodeAgent(**agent_kwargs)
         
         instruction = f"""
         You are a backend programmer. 
@@ -1184,11 +1255,14 @@ Here is the question and attached files are stored in your current directory:
             observation, _, _ = isolated_env.step("I WANT TO ANSWER:" + answer)
             return "The task is finished. And your answer is received.", "Task finished" 
         
-        agent = CodeAgent(
+        agent_kwargs = dict(
             tools=CORE_TOOLS + [ask_user, finish_task],
             planning_interval=4,
             max_steps=80,
-            model=model)
+            model=model,
+        )
+        maybe_add_budget_callback(agent_kwargs, BUDGET, kwargs['model_name'])
+        agent = CodeAgent(**agent_kwargs)
         
         instruction = f"""
         You are a frontend designer. You are given a task to solve the following problem:
@@ -1620,29 +1694,31 @@ Here is the question and attached files are stored in your current directory:
         wiki = isolated_env.wiki
         with open('wiki.md', 'w') as f:
             f.write(wiki)
-        agent = CodeAgent(
-        tools=CORE_TOOLS + [
-            book_reservation,
-            calculate,
-            cancel_reservation,
-            get_reservation_details,
-            get_user_details,
-            list_all_airports,
-            search_direct_flight,
-            search_onestop_flight,
-            send_certificate,
-            think,
-            transfer_to_human_agents,
-            update_reservation_baggages,
-            update_reservation_flights,
-            update_reservation_passengers,
-            ask_user
-        ],
-        planning_interval=4,
-        budget_exceeded_callback=partial(check_budget_exceeded, budget=BUDGET, model_name=kwargs['model_name']) if BUDGET else None,
-        max_steps=200,
-        additional_authorized_imports=AUTHORIZED_IMPORTS,
-        model=model)
+        agent_kwargs = dict(
+            tools=CORE_TOOLS + [
+                book_reservation,
+                calculate,
+                cancel_reservation,
+                get_reservation_details,
+                get_user_details,
+                list_all_airports,
+                search_direct_flight,
+                search_onestop_flight,
+                send_certificate,
+                think,
+                transfer_to_human_agents,
+                update_reservation_baggages,
+                update_reservation_flights,
+                update_reservation_passengers,
+                ask_user,
+            ],
+            planning_interval=4,
+            max_steps=200,
+            additional_authorized_imports=AUTHORIZED_IMPORTS,
+            model=model,
+        )
+        maybe_add_budget_callback(agent_kwargs, BUDGET, kwargs['model_name'])
+        agent = CodeAgent(**agent_kwargs)
         
         agent.python_executor.state["__name__"] = "__main__"
         ### YOUR AGENT CODE HERE ###
@@ -1988,13 +2064,15 @@ async def run_inspect(sample: dict[str, Any], **kwargs) -> dict[str, Any]:
         query_vision_language_model
     ]
         
-    agent = CodeAgent(
-    tools=CORE_TOOLS_INSPECT,
-    planning_interval=4,
-    max_steps=200,
-    additional_authorized_imports=AUTHORIZED_IMPORTS,
-    budget_exceeded_callback=partial(check_budget_exceeded, budget=BUDGET, model_name=kwargs['model_name']) if BUDGET else None,
-    model=model)
+    agent_kwargs = dict(
+        tools=CORE_TOOLS_INSPECT,
+        planning_interval=4,
+        max_steps=200,
+        additional_authorized_imports=AUTHORIZED_IMPORTS,
+        model=model,
+    )
+    maybe_add_budget_callback(agent_kwargs, BUDGET, kwargs['model_name'])
+    agent = CodeAgent(**agent_kwargs)
     agent.python_executor.state["__name__"] = "__main__"
     
         

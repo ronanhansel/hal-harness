@@ -216,7 +216,24 @@ class PipelineBase:
         return f"{base_command} {flag}"
 
     def _get_task_payload(self, task_id: str) -> Dict[str, Any]:
-        return get_task_data(task_id, self.benchmark_name)
+        try:
+            return get_task_data(task_id, self.benchmark_name)
+        except (ValueError, FileNotFoundError, KeyError) as exc:
+            LOGGER.warning(
+                "Falling back to minimal metadata for task %s (benchmark=%s): %s",
+                task_id,
+                self.benchmark_name,
+                exc,
+            )
+            return {
+                "instance_id": task_id,
+                "problem_statement": (
+                    f"Task metadata unavailable for benchmark '{self.benchmark_name}'. "
+                    "Use the rubric explanation and trace tail to investigate."
+                ),
+                "repo": None,
+                "base_commit": None,
+            }
 
     def _fix_dir_for_task(self, task_id: str, ensure_exists: bool = False) -> Path:
         path = self.fix_benchmark_root / self._sanitize_task_id(task_id)

@@ -55,6 +55,7 @@ MODEL_PRICES_DICT = {
                 "openai/gpt-4o-2024-08-06": {"prompt_tokens": 2.5/1e6, "completion_tokens": 10/1e6},
                 "openai/gpt-4o-mini-2024-07-18": {"prompt_tokens": 0.15/1e6, "completion_tokens": 0.6/1e6},
                 "openai/gpt-4.1-2025-04-14": {"prompt_tokens": 2/1e6, "completion_tokens": 8/1e6},
+                "azure/gpt-4.1": {"prompt_tokens": 2/1e6, "completion_tokens": 8/1e6},
                 "openai/gpt-4.1-mini-2025-04-14": {"prompt_tokens": 0.4/1e6, "completion_tokens": 1.6/1e6},
                 "openai/gpt-4.1-nano-2025-04-14": {"prompt_tokens": 0.1/1e6, "completion_tokens": 0.4/1e6},
                 "openai/gpt-4.5-preview-2025-02-27": {"prompt_tokens": 75/1e6, "completion_tokens": 150/1e6},
