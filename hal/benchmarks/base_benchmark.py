@@ -93,8 +93,16 @@ class BaseBenchmark(ABC):
 
         # Get cost and usage metrics
         if weave_client is not None:
-            total_cost, total_usage = get_total_cost(weave_client)
-            raw_logging, latency_dict = get_weave_calls(weave_client)
+            try:
+                total_cost, total_usage = get_total_cost(weave_client)
+            except Exception as exc:
+                print_warning(f"Failed to fetch token usage data from Weave; continuing without it: {exc}")
+                total_cost, total_usage = 0.0, {}
+            try:
+                raw_logging, latency_dict = get_weave_calls(weave_client)
+            except Exception as exc:
+                print_warning(f"Failed to fetch Weave traces; continuing without them: {exc}")
+                raw_logging, latency_dict = [], {}
         else:
             total_cost, total_usage = 0.0, {}
             raw_logging, latency_dict = [], {}
@@ -147,5 +155,4 @@ class BaseBenchmark(ABC):
     def upload_results(self, run_id: str, results: Dict[str, Any]):
         """Upload results to storage. Override if needed."""
         pass
-
 

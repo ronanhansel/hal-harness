@@ -13,3 +13,6 @@ tiktoken
 pandas
 litellm==1.76.0
 wandb==0.17.9
+weave
+click>=8.0.0
+certifi
