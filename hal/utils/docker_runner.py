@@ -642,6 +642,7 @@ import traceback
 import socket
 import urllib.parse
 import re
+import sys
 
 def _network_preflight() -> None:
     enabled = (os.getenv("HAL_DOCKER_PREFLIGHT_NETWORK") or "").strip().lower() in ("1", "true", "yes")
@@ -736,6 +737,13 @@ try:
     else:
         weave_enabled = False
     
+    # Make hal-harness + agent modules importable regardless of current working directory.
+    hal_harness_root = "/workspace/hal-harness"
+    agent_root = os.path.join(hal_harness_root, "agents", "{agent_name}")
+    for path in (hal_harness_root, agent_root):
+        if path and path not in sys.path:
+            sys.path.insert(0, path)
+
     # CoreBench capsules are staged under /workspace/environment (mirrors /root/environment in the
     # original harness). Run the agent from there so relative paths in tasks resolve correctly.
     try:
