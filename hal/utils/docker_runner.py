@@ -388,6 +388,17 @@ class DockerRunner:
             temp_agent_dir.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(agent_dir_path, temp_agent_dir, dirs_exist_ok=True)
 
+            # Ensure the HAL python package (hal-harness/hal/...) is available inside the container.
+            # Many agents import helpers like `hal.utils.weave_utils`, which will fail if we only copy the agent folder.
+            harness_root = Path(__file__).resolve().parents[2]
+            source_hal = harness_root / "hal"
+            if source_hal.exists():
+                shutil.copytree(
+                    source_hal,
+                    temp_dir / "hal-harness" / "hal",
+                    dirs_exist_ok=True,
+                )
+
             sibling_open_deep = agent_dir_path.parent / "open_deep_research"
             if sibling_open_deep.exists():
                 shutil.copytree(
