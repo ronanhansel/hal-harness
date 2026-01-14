@@ -736,12 +736,20 @@ try:
     else:
         weave_enabled = False
     
+    # CoreBench capsules are staged under /workspace/environment (mirrors /root/environment in the
+    # original harness). Run the agent from there so relative paths in tasks resolve correctly.
+    try:
+        if os.path.isdir("/workspace/environment"):
+            os.chdir("/workspace/environment")
+    except Exception:
+        pass
+
     # Load input data
-    with open("input.json", "r") as f:
+    with open("/workspace/input.json", "r") as f:
         input_data = json.load(f)
     
     # Load agent arguments
-    with open("agent_args.json", "r") as f:
+    with open("/workspace/agent_args.json", "r") as f:
         agent_args = json.load(f)
 
     _network_preflight()
@@ -786,7 +794,7 @@ try:
         result = agent_fn(input_data, **agent_args)
     
     # Save output
-    with open("output.json", "w") as f:
+    with open("/workspace/output.json", "w") as f:
         json.dump(result, f)
 
 except Exception as e:
