@@ -619,7 +619,7 @@ def _extract_tools_from_python_code(code: str) -> List[str]:
 
     return found
 
-def collect_task_metrics(agent: CodeAgent) -> Dict[str, Any]:
+def collect_task_metrics(agent: CodeAgent, pricing_model_name: Optional[str] = None) -> Dict[str, Any]:
     action_steps = [step for step in agent.memory.steps if isinstance(step, ActionStep)]
     tool_call_sequence: List[str] = []
     step_summaries: List[Dict[str, Any]] = []
@@ -669,15 +669,20 @@ def collect_task_metrics(agent: CodeAgent) -> Dict[str, Any]:
         }
         step_summaries.append(step_summary)
 
-    # Calculate cost using MODEL_PRICES_DICT
+    # Calculate cost using MODEL_PRICES_DICT (prefer the pricing model name over the API model id).
     model_cost = 0.0
+    candidate_names: List[str] = []
+    if pricing_model_name:
+        candidate_names.append(pricing_model_name)
     if hasattr(agent, 'model') and hasattr(agent.model, 'model_id'):
-        model_name = agent.model.model_id
+        candidate_names.append(str(agent.model.model_id))
+    for model_name in candidate_names:
         if model_name in MODEL_PRICES_DICT:
             model_cost = (
                 MODEL_PRICES_DICT[model_name]["prompt_tokens"] * total_input_tokens
                 + MODEL_PRICES_DICT[model_name]["completion_tokens"] * total_output_tokens
             )
+            break
 
     metrics = {
         "total_input_tokens": total_input_tokens,
@@ -701,7 +706,8 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
     
     import litellm
     model_params = {}
-    model_params['model_id'] = kwargs['model_name']
+    # `model_name` is used for pricing + reporting; `api_model_id` can override the actual ID sent to the API.
+    model_params['model_id'] = kwargs.get('api_model_id') or kwargs['model_name']
     
     # Handle reasoning parameters based on provider
     if 'reasoning_effort' in kwargs:
@@ -827,7 +833,7 @@ No outside libraries are allowed.
             response = response.split('```python')[1].split('```')[0]
         
         # Collect metrics
-        metrics = collect_task_metrics(agent)
+        metrics = collect_task_metrics(agent, pricing_model_name=kwargs.get("model_name"))
         
         save_agent_steps(agent, kwargs, response, task)
         
@@ -1132,7 +1138,7 @@ Here is the question and attached files are stored in your current directory:
         response = agent.run(prompt)
 
         # Collect metrics
-        metrics = collect_task_metrics(agent)
+        metrics = collect_task_metrics(agent, pricing_model_name=kwargs.get("model_name"))
         
         save_agent_steps(agent, kwargs, response, task)
         
@@ -1738,7 +1744,7 @@ User's question: {user_question}
         save_agent_steps(agent, kwargs, response, task)
 
         # Collect metrics
-        metrics = collect_task_metrics(agent)
+        metrics = collect_task_metrics(agent, pricing_model_name=kwargs.get("model_name"))
          
         ### WHEN DONE WE RETURN THE ENV STATE ###
         return {task_id: {"reward": isolated_env.reward, "taken_actions": [action.model_dump() for action in isolated_env.actions], "task": isolated_env.task.model_dump(), "metrics": metrics}}
@@ -2000,7 +2006,7 @@ def generate_dna(N: int, PWM: dict) -> tuple:
         response = agent.run(prompt)
         
         # Collect metrics
-        metrics = collect_task_metrics(agent)
+        metrics = collect_task_metrics(agent, pricing_model_name=kwargs.get("model_name"))
         
         save_agent_steps(agent, kwargs, response, task)
         

@@ -269,6 +269,7 @@ def get_total_cost(client):
     total_cost = 0
     token_usage = {}
     requests = 0
+    pricing_alias = os.getenv("HAL_PRICING_MODEL_NAME")
 
     # Fetch all the calls in the project
     print_step("Getting token usage data (this can take a while)...")
@@ -310,9 +311,12 @@ def get_total_cost(client):
                 progress.update(task, advance=1)
                 continue
 
-            for k, cost in usage_items:   
-                if k not in token_usage:
-                    token_usage[k] = {
+            for k, cost in usage_items:
+                effective_key = k
+                if pricing_alias and effective_key not in MODEL_PRICES_DICT:
+                    effective_key = pricing_alias
+                if effective_key not in token_usage:
+                    token_usage[effective_key] = {
                         "prompt_tokens": 0,
                         "completion_tokens": 0,
                         "cache_creation_input_tokens": 0,
@@ -322,10 +326,10 @@ def get_total_cost(client):
                 requests += cost.get("requests", 0)
                 prompt_tokens, cached_input, cache_creation, completion = _normalize_usage(cost)
                 
-                token_usage[k]["prompt_tokens"] += prompt_tokens
-                token_usage[k]["completion_tokens"] += completion
-                token_usage[k]["cache_creation_input_tokens"] += cache_creation
-                token_usage[k]["cache_read_input_tokens"] += cached_input
+                token_usage[effective_key]["prompt_tokens"] += prompt_tokens
+                token_usage[effective_key]["completion_tokens"] += completion
+                token_usage[effective_key]["cache_creation_input_tokens"] += cache_creation
+                token_usage[effective_key]["cache_read_input_tokens"] += cached_input
             progress.update(task, advance=1)
             
     total_cost = 0

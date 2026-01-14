@@ -364,8 +364,16 @@ def validate_model_pricing(model_name: str) -> None:
     model_name = model_name.replace("together_ai/", "")
     
     if model_name not in MODEL_PRICES_DICT:
-        print_error(f"Model '{model_name}' not found in pricing dictionary. Please add pricing information to MODEL_PRICES_DICT in weave_utils.py. Exiting...")
-        sys.exit(1)
+        if os.getenv("HAL_STRICT_MODEL_PRICING", "").strip() in {"1", "true", "yes"}:
+            print_error(
+                f"Model '{model_name}' not found in pricing dictionary. "
+                "Add pricing info to MODEL_PRICES_DICT in weave_utils.py, or unset HAL_STRICT_MODEL_PRICING to skip."
+            )
+            sys.exit(1)
+        print_warning(
+            f"Model '{model_name}' not found in pricing dictionary. "
+            "Continuing without cost validation (set HAL_STRICT_MODEL_PRICING=1 to enforce)."
+        )
 
 
 if __name__ == "__main__":
