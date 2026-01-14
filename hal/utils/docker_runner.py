@@ -601,7 +601,9 @@ def _network_preflight() -> None:
             parsed = urllib.parse.urlparse(val)
             host = parsed.hostname or "set"
             port = parsed.port
-            return f"set({host}:{port})" if port else f"set({host})"
+            if port:
+                return "set(%s:%s)" % (host, port)
+            return "set(%s)" % host
         except Exception:
             return "set"
 
