@@ -88,17 +88,7 @@ class InspectorPipeline(PipelineBase):
         report_dict = report.to_dict()
 
         workspace_root = Path.cwd().resolve()
-        # Preserve the model-generated next_steps for audit/debugging, but do not allow
-        # rerun instructions to leak into the coding agent workflow (user controls reruns).
-        model_next_steps = (report_dict.get("next_steps") or "").strip()
-        if model_next_steps:
-            report_dict["inspector_suggested_next_steps"] = model_next_steps
-        reminder_parts = [
-            f"Create or update {self._fix_dir_for_task(task_id, ensure_exists=True)} with overlays/patches/input/env overrides.",
-            "Do NOT run the HAL debugger or any rerun commands as part of this step.",
-            "Do a careful self-review and produce a complete fix package in one pass.",
-        ]
-        report_dict["next_steps"] = " ".join(part for part in reminder_parts if part).strip()
+        report_dict["fix_folder"] = str(self._fix_dir_for_task(task_id, ensure_exists=True))
         report_dict["coding_agent_context"] = self._build_coding_agent_context(
             workspace_root,
             task_id,

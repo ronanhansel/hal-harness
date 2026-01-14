@@ -139,14 +139,17 @@ class PipelineBase:
             "Do NOT run the HAL debugger or any rerun commands as part of this step.",
             "Do a careful self-review and produce a complete fix package in one pass.",
             "If the fix needs validation, describe what should be validated, but do not execute commands.",
+            "Before finishing, enumerate the exact files you created/updated under the fix folder.",
         ]
         return {
             "working_directory": str(workspace_root),
             "fix_folder": str(fix_dir),
             "system_prompt": (
                 "You are a coding agent operating inside hal-harness. Follow the inspection report guidance, "
-                "prepare self-contained fixes under fixes/<task_id>/, and do NOT run any reruns. "
-                "Never modify repository files directly; only create or update fix packages."
+                "prepare self-contained fixes under fixes/<benchmark>/<task_id>/, and do NOT run any reruns. "
+                "Never modify repository files directly; only create or update fix packages. "
+                "You MUST write the fix package to disk under the fix folder (do not just describe it). "
+                "Only files under the fix folder may be changed."
             ),
             "instructions": instructions,
         }

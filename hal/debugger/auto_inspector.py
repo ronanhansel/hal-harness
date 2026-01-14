@@ -25,9 +25,12 @@ LOGGER = logging.getLogger(__name__)
 class InspectionReport:
     analysis: str
     rationale: str
+    evidence_summary: str
+    environment_assumptions: List[str]
     recommended_files: List[str]
     recommended_actions: List[str]
-    next_steps: str
+    fix_package_plan: List[str]
+    self_review_checklist: List[str]
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -69,9 +72,12 @@ class AutoInspector:
             "Your output MUST include:\n"
             "1) concise analysis of why the run failed,\n"
             "2) rationale referencing the evidence provided,\n"
-            "3) concrete files/components the coding agent should inspect,\n"
-            "4) recommended actions to build a FIX PACKAGE (agent overlays, env/input overrides, prompt edits),\n"
-            "5) a deep self-review checklist. If validation is needed, describe what should be validated, but do "
+            "3) a short evidence summary (what signals prove the diagnosis),\n"
+            "4) explicit environment assumptions (what is/isn't available),\n"
+            "5) concrete files/components the coding agent should inspect,\n"
+            "6) recommended actions to build a FIX PACKAGE (agent overlays, env/input overrides, prompt edits),\n"
+            "7) an explicit fix-package plan (which files to create under fixes/<benchmark>/<task_id>/),\n"
+            "8) a deep self-review checklist. If validation is needed, describe what should be validated, but do "
             "NOT instruct to run commands.\n\n"
             "CRITICAL POLICY:\n"
             "- Do NOT advise the agent to give up or only provide a static explanation.\n"
@@ -88,8 +94,8 @@ class AutoInspector:
             "\"do not attempt installs\" / \"explain that it cannot be executed\"), explicitly recommend changing "
             "that fix prompt to actionable remediation steps instead.\n\n"
             "BANNED CONTENT:\n"
-            "- Do NOT tell the coding agent to rerun, re-run, execute, or validate by running the HAL debugger or "
-            "any command. The user will decide when to rerun.\n\n"
+            "- Do NOT tell the coding agent to rerun, re-run, execute, or validate by running the HAL debugger.\n"
+            "- Do NOT include a \"next steps\" section that instructs reruns; focus on one-pass fix planning.\n\n"
             "ENVIRONMENT NOTE:\n"
             "- If you mention any Python commands (e.g., for linting, unit tests, or tooling), they should be run "
             "inside the preconfigured conda environment named `hal` (e.g., `conda activate hal`).\n\n"
@@ -176,11 +182,19 @@ Produce a JSON object with this exact schema:
 {{
   "analysis": "<concise description of the failure>",
   "rationale": "<cite the evidence from trace/explanation>",
+  "evidence_summary": "<bullet-like summary of signals proving the diagnosis>",
+  "environment_assumptions": ["<assumption 1>", "<assumption 2>", "..."],
   "recommended_files": ["relative/path.py", "..."],
   "recommended_actions": [
     "Step-by-step actions a coding agent should perform to fix the issue"
   ],
-  "next_steps": "Explicit reminder that the coding agent must re-run the HAL debugger after applying fixes."
+  "fix_package_plan": [
+    "List the concrete fix-package files to create under fixes/<benchmark>/<task_id>/ and what each should contain"
+  ],
+  "self_review_checklist": [
+    "Checklist item 1",
+    "Checklist item 2"
+  ]
 }}
 
 Do NOT include code patches. Focus on investigative guidance only.
@@ -246,17 +260,30 @@ Do NOT include code patches. Focus on investigative guidance only.
         rationale = (payload.get("rationale") or "").strip()
         recommended_files = payload.get("recommended_files") or []
         recommended_actions = payload.get("recommended_actions") or []
-        next_steps = (payload.get("next_steps") or "").strip()
+        evidence_summary = (payload.get("evidence_summary") or "").strip()
+        environment_assumptions = payload.get("environment_assumptions") or []
+        fix_package_plan = payload.get("fix_package_plan") or []
+        self_review_checklist = payload.get("self_review_checklist") or []
 
-        if not analysis or not rationale:
-            raise ValueError("Missing analysis or rationale in AutoInspector response")
+        if not analysis or not rationale or not evidence_summary:
+            raise ValueError("Missing analysis, rationale, or evidence_summary in AutoInspector response")
+
+        if isinstance(environment_assumptions, str):
+            environment_assumptions = [environment_assumptions]
+        if isinstance(fix_package_plan, str):
+            fix_package_plan = [fix_package_plan]
+        if isinstance(self_review_checklist, str):
+            self_review_checklist = [self_review_checklist]
 
         return InspectionReport(
             analysis=analysis,
             rationale=rationale,
+            evidence_summary=evidence_summary,
+            environment_assumptions=list(environment_assumptions),
             recommended_files=list(recommended_files),
             recommended_actions=list(recommended_actions),
-            next_steps=next_steps,
+            fix_package_plan=list(fix_package_plan),
+            self_review_checklist=list(self_review_checklist),
         )
 
     @staticmethod
