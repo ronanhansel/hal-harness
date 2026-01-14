@@ -319,9 +319,13 @@ try:
     spec.loader.exec_module(module)
     agent_fn = getattr(module, "{function_name}")
     
-    # Run the agent function
+    # Wrap the agent function in a Weave op so the run produces at least one call record per task.
+    @weave.op()
+    def _agent_op(_input_data, _agent_args):
+        return agent_fn(_input_data, **_agent_args)
+
     with weave.attributes({{"weave_task_id": "{task_id}"}}):
-        result = agent_fn(input_data, **agent_args)
+        result = _agent_op(input_data, agent_args)
     
     # Save output
     with open("output.json", "w") as f:

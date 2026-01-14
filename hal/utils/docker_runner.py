@@ -129,6 +129,13 @@ class DockerRunner:
             error_message = "Docker is not available on this system. Please install Docker to use the Docker runner."
             verbose_logger.debug(error_message)
             raise RuntimeError(error_message) from e
+
+    def _sanitize_forwarded_env(self, env: Dict[str, str]) -> Dict[str, str]:
+        # Avoid forwarding host TLS overrides that usually reference host-only paths and
+        # break requests/wandb/weave inside containers.
+        for key in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CURL_CA_BUNDLE"):
+            env.pop(key, None)
+        return env
     
     def _ensure_docker_image(self) -> None:
         """Ensure the Docker image exists, building it if necessary"""
@@ -329,6 +336,7 @@ class DockerRunner:
                 pass
             if env_override:
                 env_vars.update({str(k): str(v) for k, v in env_override.items() if v is not None})
+            env_vars = self._sanitize_forwarded_env(env_vars)
 
             container = self.docker_client.containers.run(
                 image=prepared_image,
@@ -492,9 +500,27 @@ try:
     except Exception as weave_import_error:
         weave_available = False
         print(f"Weave import failed, disabling tracing: {{weave_import_error}}")
-    
+
+    def _try_autopatch() -> None:
+        # Best-effort: enable LLM/network instrumentation when available.
+        # Different Weave versions expose different autopatch entry points.
+        candidates = [
+            ("weave", "autopatch"),
+            ("weave.integrations.openai", "autopatch"),
+            ("weave.integrations.litellm", "autopatch"),
+        ]
+        for mod_name, fn_name in candidates:
+            try:
+                mod = __import__(mod_name, fromlist=["*"])
+                fn = getattr(mod, fn_name, None)
+                if callable(fn):
+                    fn()
+            except Exception:
+                pass
+
     if weave_available:
         try:
+            _try_autopatch()
             weave.init("{run_id}")
             weave_enabled = True
         except Exception as weave_init_error:
@@ -521,15 +547,13 @@ try:
     spec.loader.exec_module(module)
     agent_fn = getattr(module, "{function_name}")
     
-    # Run the agent function
+    # Wrap the agent function in a Weave op so the run produces at least one call record per task.
     if weave_enabled:
-        weave_ctx = weave.attributes({{"weave_task_id": "{task_id}"}})
-    else:
-        weave_ctx = None
-
-    if weave_ctx:
-        with weave_ctx:
-            result = agent_fn(input_data, **agent_args)
+        @weave.op()
+        def _agent_op(_input_data, _agent_args):
+            return agent_fn(_input_data, **_agent_args)
+        with weave.attributes({{"weave_task_id": "{task_id}"}}):
+            result = _agent_op(input_data, agent_args)
     else:
         result = agent_fn(input_data, **agent_args)
     
