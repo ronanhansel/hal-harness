@@ -80,7 +80,17 @@ class DockerRunner:
         return f"{prefix}_{benchmark}"
 
     def _requirements_hash(self, requirements_path: str) -> str:
-        return hashlib.sha256(Path(requirements_path).read_bytes()).hexdigest()[:16]
+        """
+        Hash requirements + the current base runner image ID.
+        This ensures that when `hal-agent-runner:latest` is rebuilt (e.g. to add R/pandoc/TeX),
+        we automatically build a fresh prepared image instead of reusing a stale one.
+        """
+        req_bytes = Path(requirements_path).read_bytes()
+        try:
+            base_image_id = self.docker_client.images.get(DOCKER_IMAGE_NAME).id.encode("utf-8")
+        except Exception:
+            base_image_id = b"unknown-base-image"
+        return hashlib.sha256(req_bytes + b"\n" + base_image_id).hexdigest()[:16]
 
     def _ensure_prepared_image(self, requirements_path: str) -> str:
         """
@@ -94,10 +104,12 @@ class DockerRunner:
             return cached
 
         tag = f"hal-agent-runner:agent-env-{req_hash}"
+        force_rebuild = (os.getenv("HAL_DOCKER_FORCE_REBUILD") or "").strip().lower() in ("1", "true", "yes")
         try:
-            self.docker_client.images.get(tag)
-            self._prepared_image_by_requirements[req_hash] = tag
-            return tag
+            if not force_rebuild:
+                self.docker_client.images.get(tag)
+                self._prepared_image_by_requirements[req_hash] = tag
+                return tag
         except docker.errors.ImageNotFound:
             pass
 
@@ -114,9 +126,10 @@ class DockerRunner:
 
             # Another process may have built it while we waited.
             try:
-                self.docker_client.images.get(tag)
-                self._prepared_image_by_requirements[req_hash] = tag
-                return tag
+                if not force_rebuild:
+                    self.docker_client.images.get(tag)
+                    self._prepared_image_by_requirements[req_hash] = tag
+                    return tag
             except docker.errors.ImageNotFound:
                 pass
 
@@ -440,6 +453,8 @@ class DockerRunner:
                 pass
             if env_override:
                 env_vars.update({str(k): str(v) for k, v in env_override.items() if v is not None})
+            # Make `conda activate ...` work in non-interactive bash sessions started by tools.
+            env_vars.setdefault("BASH_ENV", "/opt/conda/etc/profile.d/conda.sh")
             env_vars = self._sanitize_forwarded_env(env_vars)
             self._maybe_warn_about_openai_base_url(env_vars)
 
