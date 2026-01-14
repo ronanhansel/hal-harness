@@ -127,8 +127,6 @@ class PipelineBase:
         self,
         workspace_root: Path,
         task_id: str,
-        rerun_command: str,
-        single_task_command: str,
     ) -> Dict[str, Any]:
         fix_dir = self._fix_dir_for_task(task_id, ensure_exists=True)
         instructions = [
@@ -137,18 +135,17 @@ class PipelineBase:
             f"Do NOT modify repository files directly; place overlays or patches under {fix_dir}.",
             f"Prefer dropping fully-edited files under {fix_dir / 'agent'} (patch.diff is only a fallback when overlays are impractical).",
             "Use input_override.json / problem_statement.txt / env_override.json if inputs or env vars must change (store them beside the fix).",
-            f"After preparing the fix package, rerun the debugger using `{rerun_command}` for the full backlog.",
-            f"To iterate quickly on this task only, run `{single_task_command}` (leverages --task-id filtering).",
+            "Do NOT run the HAL debugger or any rerun commands as part of this step.",
+            "Do a careful self-review and produce a complete fix package in one pass.",
+            "If the fix needs validation, describe what should be validated, but do not execute commands.",
         ]
         return {
             "working_directory": str(workspace_root),
             "fix_folder": str(fix_dir),
-            "rerun_command": rerun_command,
-            "rerun_single_task_command": single_task_command,
             "system_prompt": (
                 "You are a coding agent operating inside hal-harness. Follow the inspection report guidance, "
-                "prepare self-contained fixes under fixes/<task_id>/, and rerun the debugger command to validate. "
-                "Never modify repository files directly."
+                "prepare self-contained fixes under fixes/<task_id>/, and do NOT run any reruns. "
+                "Never modify repository files directly; only create or update fix packages."
             ),
             "instructions": instructions,
         }

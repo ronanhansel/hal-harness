@@ -70,7 +70,6 @@ class InspectorPipeline(PipelineBase):
         else:
             run_id = f"inspect_{sanitized_id}_{int(time.time())}"
             task_run_dir = self._get_task_run_dir(task_id, run_id)
-        single_task_command = self._build_single_task_command(self.rerun_command, task_id)
 
         fix_package = load_fix_package(sanitized_id, self.fixes_root, self.benchmark_name)
         context_blocks = self._build_context_blocks(
@@ -89,19 +88,20 @@ class InspectorPipeline(PipelineBase):
         report_dict = report.to_dict()
 
         workspace_root = Path.cwd().resolve()
-        next_steps = report_dict.get("next_steps", "")
+        # Preserve the model-generated next_steps for audit/debugging, but do not allow
+        # rerun instructions to leak into the coding agent workflow (user controls reruns).
+        model_next_steps = (report_dict.get("next_steps") or "").strip()
+        if model_next_steps:
+            report_dict["inspector_suggested_next_steps"] = model_next_steps
         reminder_parts = [
-            next_steps.strip(),
             f"Create or update {self._fix_dir_for_task(task_id, ensure_exists=True)} with overlays/patches/input/env overrides.",
-            f"After packaging fixes, rerun `{self.rerun_command}` to validate queued tasks.",
-            f"For a quick single-task check, rerun `{single_task_command}`.",
+            "Do NOT run the HAL debugger or any rerun commands as part of this step.",
+            "Do a careful self-review and produce a complete fix package in one pass.",
         ]
         report_dict["next_steps"] = " ".join(part for part in reminder_parts if part).strip()
         report_dict["coding_agent_context"] = self._build_coding_agent_context(
             workspace_root,
             task_id,
-            self.rerun_command,
-            single_task_command,
         )
 
         self._write_json(task_run_dir / "inspection_report.json", report_dict, task_run_dir)
