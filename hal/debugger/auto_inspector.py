@@ -90,6 +90,9 @@ class AutoInspector:
             "BANNED CONTENT:\n"
             "- Do NOT tell the coding agent to rerun, re-run, execute, or validate by running the HAL debugger or "
             "any command. The user will decide when to rerun.\n\n"
+            "ENVIRONMENT NOTE:\n"
+            "- If you mention any Python commands (e.g., for linting, unit tests, or tooling), they should be run "
+            "inside the preconfigured conda environment named `hal` (e.g., `conda activate hal`).\n\n"
             "Respond strictly as JSON with the schema provided."
         )
 

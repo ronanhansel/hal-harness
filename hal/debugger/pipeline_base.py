@@ -131,6 +131,7 @@ class PipelineBase:
         fix_dir = self._fix_dir_for_task(task_id, ensure_exists=True)
         instructions = [
             f"cd {workspace_root}",
+            "If you include any Python commands in your guidance, assume they should be run inside the preconfigured conda env `hal` (e.g., `conda activate hal`).",
             "Inspect inspection_report.json for analysis and rationale.",
             f"Do NOT modify repository files directly; place overlays or patches under {fix_dir}.",
             f"Prefer dropping fully-edited files under {fix_dir / 'agent'} (patch.diff is only a fallback when overlays are impractical).",
