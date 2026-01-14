@@ -70,7 +70,23 @@ class AutoInspector:
             "3) concrete files or components the coding agent should inspect,\n"
             "4) recommended actions the coding agent should perform before re-running "
             "the debugger, and\n"
-            "5) explicit reminder to re-run the debugger after applying changes.\n"
+            "5) explicit reminder to re-run the debugger after applying changes.\n\n"
+            "CRITICAL POLICY:\n"
+            "- Do NOT advise the agent to give up or only provide a static explanation.\n"
+            "- When the rubric indicates an environmental barrier (missing executables, "
+            "permissions, missing dependencies, read-only paths, etc.), your job is to "
+            "propose a FIX PACKAGE that makes the run succeed in this evaluation environment.\n"
+            "- Prefer environment-scoped solutions that are compatible with the harness:\n"
+            "  • Use fix-package env overrides (env_override.json) to set writable dirs and tool config.\n"
+            "  • Use fix-package prompt/input overrides (problem_statement.txt, input_override.json) to add concrete "
+            "commands and constraints (e.g., use $HAL_OUTPUT_DIR, avoid writing to .., prefer conda installs).\n"
+            "  • Only recommend OS-level installs (apt-get) if the environment clearly supports it; otherwise prefer "
+            "conda/mamba, vendored deps, or harness-supported mechanisms.\n"
+            "- If the current prompt injection instructs the agent to avoid attempting any remediation (e.g. "
+            "\"do not attempt installs\" / \"explain that it cannot be executed\"), explicitly recommend changing "
+            "that fix prompt to actionable remediation steps instead.\n"
+            "- Always include a concrete validation plan (exact commands) that the coding agent should run after "
+            "applying the fix package.\n"
             "Respond strictly as JSON with the schema provided."
         )
 
@@ -119,6 +135,12 @@ class AutoInspector:
         agent_source = self._load_agent_source()
         explanation = failure_context.get("explanation", "").strip()
         trace_content = failure_context.get("trace_content", "").strip()
+        criteria = (failure_context.get("criteria") or "").strip()
+        model_runs = failure_context.get("model_runs")
+        if isinstance(model_runs, (list, tuple)):
+            model_runs_text = ", ".join(str(item) for item in model_runs if item)
+        else:
+            model_runs_text = str(model_runs or "").strip()
 
         extra_sections = "\n\n".join(
             f"[{title.upper()}]\n{body.strip()}" for title, body in context_blocks if body.strip()
@@ -126,6 +148,12 @@ class AutoInspector:
 
         return f"""
 Task ID: {failure_context.get('task_id') or 'unknown'}
+
+[RUBRIC CRITERIA]
+{criteria or 'unknown'}
+
+[AFFECTED MODEL RUNS]
+{model_runs_text or (failure_context.get('model_run') or 'unknown')}
 
 [ROOT CAUSE ANALYSIS]
 {explanation or 'No explanation provided.'}
