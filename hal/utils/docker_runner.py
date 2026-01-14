@@ -10,6 +10,7 @@ import docker
 import time
 import hashlib
 import shlex
+import urllib.parse
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 from ..benchmarks.base_benchmark import BaseBenchmark
@@ -33,6 +34,10 @@ class DockerRunner:
         self.benchmark = benchmark
         self.verbose = False
         self._prepared_image_by_requirements: dict[str, str] = {}
+        # Optional Docker network mode override (e.g. "host") for environments where the
+        # default bridge network cannot reach external endpoints.
+        self.network_mode: str | None = os.getenv("HAL_DOCKER_NETWORK_MODE") or None
+        self.dotenv_path: str = os.getenv("HAL_DOTENV_PATH") or ".env"
         
         # Initialize Docker client
         self.docker_client = docker.from_env()
@@ -131,10 +136,16 @@ class DockerRunner:
             raise RuntimeError(error_message) from e
 
     def _sanitize_forwarded_env(self, env: Dict[str, str]) -> Dict[str, str]:
-        # Avoid forwarding host TLS overrides that usually reference host-only paths and
-        # break requests/wandb/weave inside containers.
-        for key in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CURL_CA_BUNDLE"):
-            env.pop(key, None)
+        keep_tls_overrides = (os.getenv("HAL_DOCKER_KEEP_TLS_ENV") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if not keep_tls_overrides:
+            # Avoid forwarding host TLS overrides that usually reference host-only paths and
+            # break requests/wandb/weave inside containers.
+            for key in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CURL_CA_BUNDLE"):
+                env.pop(key, None)
         # Avoid clobbering the image PATH (contains /opt/conda/bin) with the host PATH.
         env.pop("PATH", None)
         # Host python env vars often point to host-only paths and can break container python.
@@ -150,6 +161,28 @@ class DockerRunner:
             elif upper.startswith("MAMBA") or upper.startswith("MICROMAMBA"):
                 env.pop(key, None)
         return env
+
+    def _maybe_warn_about_openai_base_url(self, env: Dict[str, str]) -> None:
+        base = (
+            env.get("OPENAI_BASE_URL")
+            or env.get("OPENAI_API_BASE")
+            or env.get("OPENAI_API_BASE_URL")
+            or env.get("AZURE_OPENAI_ENDPOINT")
+            or env.get("LITELLM_BASE_URL")
+        )
+        if not base:
+            return
+        try:
+            parsed = urllib.parse.urlparse(base)
+            host = parsed.hostname or base
+        except Exception:
+            host = base
+        if host in ("localhost", "127.0.0.1", "0.0.0.0"):
+            verbose_logger.debug(
+                "Detected OpenAI base URL points at localhost (%s). Inside Docker this refers to the container; "
+                "use `HAL_DOCKER_NETWORK_MODE=host` (Linux) or set the base URL to `http://host.docker.internal:<port>`.",
+                base,
+            )
     
     def _ensure_docker_image(self) -> None:
         """Ensure the Docker image exists, building it if necessary"""
@@ -358,20 +391,54 @@ class DockerRunner:
             # Pass through host env + .env + per-task overrides so Weave/W&B can upload traces.
             env_vars: Dict[str, str] = {k: v for k, v in os.environ.items() if isinstance(v, str)}
             try:
-                env_vars.update({k: v for k, v in dotenv_values(".env").items() if v is not None})
+                env_vars.update(
+                    {
+                        k: v
+                        for k, v in dotenv_values(self.dotenv_path).items()
+                        if v is not None
+                    }
+                )
             except Exception:
                 pass
             if env_override:
                 env_vars.update({str(k): str(v) for k, v in env_override.items() if v is not None})
             env_vars = self._sanitize_forwarded_env(env_vars)
+            self._maybe_warn_about_openai_base_url(env_vars)
 
-            container = self.docker_client.containers.run(
-                image=prepared_image,
-                name=container_id,
-                detach=True,
-                command=["tail", "-f", "/dev/null"],  # Keep container running
-                environment=env_vars,
+            # Provide a stable way for containers to reach host-local services (e.g. a local OpenAI/LiteLLM proxy).
+            # On Linux, Docker requires an explicit host-gateway mapping.
+            extra_hosts: Optional[Dict[str, str]] = {"host.docker.internal": "host-gateway"}
+            disable_host_gateway = (os.getenv("HAL_DOCKER_DISABLE_HOST_GATEWAY") or "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
             )
+            if disable_host_gateway:
+                extra_hosts = None
+
+            try:
+                container = self.docker_client.containers.run(
+                    image=prepared_image,
+                    name=container_id,
+                    detach=True,
+                    command=["tail", "-f", "/dev/null"],  # Keep container running
+                    environment=env_vars,
+                    network_mode=self.network_mode,
+                    extra_hosts=extra_hosts,
+                )
+            except docker.errors.APIError as e:
+                # Some Docker engines don't support host-gateway; retry without it.
+                if extra_hosts and "host-gateway" in str(e).lower():
+                    container = self.docker_client.containers.run(
+                        image=prepared_image,
+                        name=container_id,
+                        detach=True,
+                        command=["tail", "-f", "/dev/null"],
+                        environment=env_vars,
+                        network_mode=self.network_mode,
+                    )
+                else:
+                    raise
             
             # Add container to active list
             self._active_containers.append(container_id)
@@ -518,6 +585,59 @@ import os
 import json
 import importlib.util
 import traceback
+import socket
+import urllib.parse
+
+def _network_preflight() -> None:
+    enabled = (os.getenv("HAL_DOCKER_PREFLIGHT_NETWORK") or "").strip().lower() in ("1", "true", "yes")
+    if not enabled:
+        return
+
+    def _proxy_host(env_key: str) -> str:
+        val = os.getenv(env_key)
+        if not val:
+            return "unset"
+        try:
+            parsed = urllib.parse.urlparse(val)
+            host = parsed.hostname or "set"
+            port = parsed.port
+            return f"set({host}:{port})" if port else f"set({host})"
+        except Exception:
+            return "set"
+
+    base = (
+        os.getenv("OPENAI_BASE_URL")
+        or os.getenv("OPENAI_API_BASE")
+        or os.getenv("OPENAI_API_BASE_URL")
+        or os.getenv("AZURE_OPENAI_ENDPOINT")
+        or os.getenv("LITELLM_BASE_URL")
+        or "https://api.openai.com/v1"
+    )
+    try:
+        parsed = urllib.parse.urlparse(base)
+        host = parsed.hostname or base
+        scheme = parsed.scheme or "https"
+        port = parsed.port or (443 if scheme == "https" else 80)
+    except Exception:
+        host = base
+        scheme = "https"
+        port = 443
+
+    print(f"[hal][docker][preflight] OPENAI_BASE={{base}} host={{host}} port={{port}}")
+    print(f"[hal][docker][preflight] HTTPS_PROXY={{_proxy_host('HTTPS_PROXY')}} HTTP_PROXY={{_proxy_host('HTTP_PROXY')}}")
+
+    if host in ("localhost", "127.0.0.1", "0.0.0.0"):
+        print(
+            "[hal][docker][preflight] WARNING: base URL points to localhost; inside Docker this refers to the container. "
+            "Use `HAL_DOCKER_NETWORK_MODE=host` (Linux) or set base URL to `http://host.docker.internal:<port>`."
+        )
+
+    try:
+        # TCP connect only (no TLS) to validate basic reachability.
+        with socket.create_connection((host, port), timeout=5):
+            print("[hal][docker][preflight] TCP connect OK")
+    except Exception as e:
+        print(f"[hal][docker][preflight] TCP connect FAILED: {{e}}")
 
 try:
     weave = None
@@ -564,6 +684,8 @@ try:
     # Load agent arguments
     with open("agent_args.json", "r") as f:
         agent_args = json.load(f)
+
+    _network_preflight()
 
     # Import agent module
     spec = importlib.util.spec_from_file_location(
