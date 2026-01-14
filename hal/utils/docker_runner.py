@@ -135,6 +135,11 @@ class DockerRunner:
         # break requests/wandb/weave inside containers.
         for key in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CURL_CA_BUNDLE"):
             env.pop(key, None)
+        # Avoid clobbering the image PATH (contains /opt/conda/bin) with the host PATH.
+        env.pop("PATH", None)
+        # Host python env vars often point to host-only paths and can break container python.
+        env.pop("PYTHONPATH", None)
+        env.pop("PYTHONHOME", None)
         return env
     
     def _ensure_docker_image(self) -> None:
@@ -409,7 +414,7 @@ class DockerRunner:
                     env_prefix = " ".join(parts) + " "
 
             proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", container_id, "bash", "-c", f"{env_prefix}conda run -n agent_env python run_agent.py",
+                "docker", "exec", container_id, "bash", "-c", f"{env_prefix}cd /workspace && /opt/conda/bin/conda run -n agent_env python run_agent.py",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
