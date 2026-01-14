@@ -21,6 +21,18 @@ RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -
 # Add conda to PATH
 ENV PATH /opt/conda/bin:$PATH
 
+# Preinstall core reproducibility toolchain used by many CoreBench tasks.
+# This reduces "environmental barrier" failures where agents are blocked by missing Rscript/pandoc/LaTeX.
+RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main \
+ && conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r \
+ && conda install -y -n base -c conda-forge \
+      r-base=4.* \
+      pandoc \
+      r-knitr \
+      r-rmarkdown \
+      texlive-core \
+ && conda clean -afy
+
 # Provide a harmless default for optional API-based tools
 ENV SERPAPI_API_KEY=dummy-serpapi-key
 

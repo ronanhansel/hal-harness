@@ -379,14 +379,14 @@ class DockerRunner:
             if sibling_open_deep.exists():
                 shutil.copytree(
                     sibling_open_deep,
-                    agent_root / "open_deep_research",
+                    temp_dir / "hal-harness" / "open_deep_research",
                     dirs_exist_ok=True,
                 )
 
             # Write input and args files
-            with open(temp_agent_dir / "input.json", "w") as f:
+            with open(temp_dir / "input.json", "w") as f:
                 json.dump({task_id: input_data}, f)
-            with open(temp_agent_dir / "agent_args.json", "w") as f:
+            with open(temp_dir / "agent_args.json", "w") as f:
                 json.dump(agent_args, f)
 
             # Copy task-specific files if they exist in input_data
@@ -410,6 +410,7 @@ class DockerRunner:
                 agent_function=agent_function,
                 task_id=task_id,
                 run_id=run_id,
+                agent_name=agent_dir_path.name,
                 weave_project=weave_project,
                 weave_op_name=task_id,
                 trace_filename=trace_filename,
@@ -418,6 +419,7 @@ class DockerRunner:
             script_path = temp_dir / "run_agent.py"
             with open(script_path, "w") as f:
                 f.write(script)
+            # Keep a copy in the agent folder as well for debugging, but execute from /workspace.
             shutil.copy2(script_path, temp_agent_dir / "run_agent.py")
             
             # create container from image and mount temp dir
@@ -539,9 +541,16 @@ class DockerRunner:
                     env_prefix = " ".join(parts) + " "
 
             proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", container_id, "bash", "-c", f"{env_prefix}cd /workspace/hal-harness/agents/{agent_dir_path.name} && /opt/conda/bin/conda run -n agent_env python run_agent.py",
+                "docker",
+                "exec",
+                container_id,
+                "bash",
+                "-c",
+                # Run from /workspace so the task repo appears as "the current directory",
+                # matching corebench instructions like "the repository cloned to your current directory".
+                f"{env_prefix}cd /workspace && /opt/conda/bin/conda run -n agent_env python run_agent.py",
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await proc.communicate()
             if stdout:
@@ -615,6 +624,7 @@ class DockerRunner:
         agent_function: str,
         task_id: str,
         run_id: str,
+        agent_name: str,
         weave_project: str,
         weave_op_name: str,
         trace_filename: str,
@@ -739,7 +749,7 @@ try:
     # Import agent module
     spec = importlib.util.spec_from_file_location(
         "{module_name}",
-        os.path.join(os.getcwd(), "{module_name}.py")
+        os.path.join("/workspace", "hal-harness", "agents", "{agent_name}", "{module_name}.py")
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
