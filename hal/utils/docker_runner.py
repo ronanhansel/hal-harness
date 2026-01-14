@@ -8,6 +8,8 @@ import subprocess
 import logging
 import docker
 import time
+import hashlib
+import shlex
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 from ..benchmarks.base_benchmark import BaseBenchmark
@@ -30,6 +32,7 @@ class DockerRunner:
         self._active_containers: List[str] = []
         self.benchmark = benchmark
         self.verbose = False
+        self._prepared_image_by_requirements: dict[str, str] = {}
         
         # Initialize Docker client
         self.docker_client = docker.from_env()
@@ -39,6 +42,83 @@ class DockerRunner:
         
         # Ensure the Docker image exists
         self._ensure_docker_image()
+
+    def _requirements_hash(self, requirements_path: str) -> str:
+        return hashlib.sha256(Path(requirements_path).read_bytes()).hexdigest()[:16]
+
+    def _ensure_prepared_image(self, requirements_path: str) -> str:
+        """
+        Build a derived image with a ready-to-run `agent_env` conda env.
+        This avoids creating conda envs + pip installing requirements per task container,
+        which is prohibitively slow when running many tasks in parallel.
+        """
+        req_hash = self._requirements_hash(requirements_path)
+        cached = self._prepared_image_by_requirements.get(req_hash)
+        if cached:
+            return cached
+
+        tag = f"hal-agent-runner:agent-env-{req_hash}"
+        try:
+            self.docker_client.images.get(tag)
+            self._prepared_image_by_requirements[req_hash] = tag
+            return tag
+        except docker.errors.ImageNotFound:
+            pass
+
+        # Avoid redundant parallel builds when multiple hal-eval processes start at once.
+        lock_file = Path(tempfile.gettempdir()) / "hal_agent_env_build.lock"
+        lock_handle = lock_file.open("a", encoding="utf-8")
+        try:
+            try:
+                import fcntl  # type: ignore
+
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            except Exception:
+                pass
+
+            # Another process may have built it while we waited.
+            try:
+                self.docker_client.images.get(tag)
+                self._prepared_image_by_requirements[req_hash] = tag
+                return tag
+            except docker.errors.ImageNotFound:
+                pass
+
+            build_dir = Path(tempfile.mkdtemp(prefix="hal_agent_env_build_"))
+            try:
+                (build_dir / "requirements.txt").write_text(
+                    Path(requirements_path).read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+                (build_dir / "Dockerfile").write_text(
+                    "\n".join(
+                        [
+                            f"FROM {DOCKER_IMAGE_NAME}",
+                            "COPY requirements.txt /tmp/requirements.txt",
+                            "RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main \\",
+                            " && conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r \\",
+                            " && conda create -y -n agent_env python=3.12 \\",
+                            " && conda run -n agent_env python -m pip install -U pip \\",
+                            " && conda run -n agent_env pip install -r /tmp/requirements.txt \\",
+                            " && conda run -n agent_env pip install weave==0.51.41 'gql<4' wandb==0.17.9",
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                _, build_logs = self.docker_client.images.build(path=str(build_dir), tag=tag)
+                for log in build_logs:
+                    if "stream" in log:
+                        verbose_logger.debug(log["stream"].strip())
+                self._prepared_image_by_requirements[req_hash] = tag
+                return tag
+            finally:
+                shutil.rmtree(build_dir, ignore_errors=True)
+        finally:
+            try:
+                lock_handle.close()
+            except Exception:
+                pass
         
     def _check_docker_available(self) -> None:
         """Check if Docker is available on the system"""
@@ -238,11 +318,24 @@ class DockerRunner:
                 f.write(script)
             
             # create container from image and mount temp dir
+            requirements_path = str(Path(agent_dir) / "requirements.txt")
+            prepared_image = self._ensure_prepared_image(requirements_path)
+
+            # Pass through host env + .env + per-task overrides so Weave/W&B can upload traces.
+            env_vars: Dict[str, str] = {k: v for k, v in os.environ.items() if isinstance(v, str)}
+            try:
+                env_vars.update({k: v for k, v in dotenv_values(".env").items() if v is not None})
+            except Exception:
+                pass
+            if env_override:
+                env_vars.update({str(k): str(v) for k, v in env_override.items() if v is not None})
+
             container = self.docker_client.containers.run(
-                image=DOCKER_IMAGE_NAME,
+                image=prepared_image,
                 name=container_id,
                 detach=True,
                 command=["tail", "-f", "/dev/null"],  # Keep container running
+                environment=env_vars,
             )
             
             # Add container to active list
@@ -261,40 +354,6 @@ class DockerRunner:
                     verbose_logger.debug(f"Container {container_id}: {stdout.decode()}")
             if stderr:
                 verbose_logger.debug(f"Container {container_id}: {stderr.decode()}")
-            
-            # create env
-            create_env_cmd = (
-                "conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && "
-                "conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r && "
-                "conda create -y -n agent_env python=3.12"
-            )
-            proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", container_id, "bash", "-c", create_env_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await proc.communicate()
-            if self.verbose:
-                if stdout:
-                    verbose_logger.debug(f"Container {container_id}: {stdout.decode()}")
-            if stderr:
-                verbose_logger.debug(f"Container {container_id}: {stderr.decode()}")
-                
-            # install requirements
-            proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", container_id, "bash", "-c", "conda run -n agent_env pip install -r /workspace/requirements.txt",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await proc.communicate()
-            if self.verbose:
-                if stdout:
-                    verbose_logger.debug(f"Container {container_id}: {stdout.decode()}")
-            if stderr:
-                verbose_logger.debug(f"Container {container_id}: {stderr.decode()}")
-            
-            # Get current environment variables
-            env_vars = os.environ.copy()
             
             # run setup script if it exists
             if self.benchmark and self.benchmark.setup_script:
@@ -327,31 +386,22 @@ class DockerRunner:
                     if stderr:
                         verbose_logger.debug(f"Container {container_id}: {stderr.decode()}")   
                         
-            # install weave
-            proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", container_id, "bash", "-c", "conda run -n agent_env pip install weave==0.51.41 'gql<4'",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await proc.communicate()
-            if self.verbose:
-                if stdout:
-                    verbose_logger.debug(f"Container {container_id}: {stdout.decode()}")
-            if stderr:
-                verbose_logger.debug(f"Container {container_id}: {stderr.decode()}")                    
-            
             # Run the script and capture output with timeout handling
             start_time = time.time() 
         
-            # get env vars from .env file
-            env_vars = dotenv_values(".env")
+            # Container env already includes host + .env; only prefix any per-task overrides.
+            env_prefix = ""
             if env_override:
-                env_vars.update(env_override)
-            env_vars_str = " ".join([f"{k}={v}" for k, v in env_vars.items()])
-            print(f"Running script with env: {env_vars_str}")
-            
+                parts: List[str] = []
+                for k, v in env_override.items():
+                    if v is None:
+                        continue
+                    parts.append(f"{shlex.quote(str(k))}={shlex.quote(str(v))}")
+                if parts:
+                    env_prefix = " ".join(parts) + " "
+
             proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", container_id, "bash", "-c", f"{env_vars_str} conda run -n agent_env python run_agent.py",
+                "docker", "exec", container_id, "bash", "-c", f"{env_prefix}conda run -n agent_env python run_agent.py",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
