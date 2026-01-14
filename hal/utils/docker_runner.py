@@ -11,6 +11,7 @@ import time
 import hashlib
 import shlex
 import urllib.parse
+import re
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 from ..benchmarks.base_benchmark import BaseBenchmark
@@ -36,7 +37,11 @@ class DockerRunner:
         self._prepared_image_by_requirements: dict[str, str] = {}
         # Optional Docker network mode override (e.g. "host") for environments where the
         # default bridge network cannot reach external endpoints.
-        self.network_mode: str | None = os.getenv("HAL_DOCKER_NETWORK_MODE") or None
+        self.network_mode: str | None = (
+            os.getenv("HAL_DOCKER_NETWORK_MODE")
+            or os.getenv("HAL_DOCKER_NETWORK")  # backwards-compat alias
+            or None
+        )
         self.dotenv_path: str = os.getenv("HAL_DOTENV_PATH") or ".env"
         
         # Initialize Docker client
@@ -47,6 +52,32 @@ class DockerRunner:
         
         # Ensure the Docker image exists
         self._ensure_docker_image()
+
+    def _slugify_label(self, value: str, fallback: str) -> str:
+        value = (value or "").strip()
+        if not value:
+            return fallback
+        # Keep it W&B/Weave friendly: letters, digits, underscore, dash, dot.
+        value = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_")
+        return value or fallback
+
+    def _infer_prefix_from_run_id(self, run_id: str) -> str:
+        prefix = (run_id or "").split("_", 1)[0]
+        return self._slugify_label(prefix, "run")
+
+    def _infer_benchmark_from_run_id(self, run_id: str) -> str:
+        if self.benchmark is not None and getattr(self.benchmark, "benchmark_name", None):
+            return self._slugify_label(str(self.benchmark.benchmark_name), "benchmark")
+        # Fallback: try to find a token that looks like a benchmark name (e.g. corebench_hard).
+        match = re.search(r"\b([a-zA-Z]+bench(?:_[a-zA-Z0-9]+)?)\b", run_id or "")
+        if match:
+            return self._slugify_label(match.group(1), "benchmark")
+        return "benchmark"
+
+    def _weave_project_for_run(self, run_id: str) -> str:
+        prefix = self._infer_prefix_from_run_id(run_id)
+        benchmark = self._infer_benchmark_from_run_id(run_id)
+        return f"{prefix}_{benchmark}"
 
     def _requirements_hash(self, requirements_path: str) -> str:
         return hashlib.sha256(Path(requirements_path).read_bytes()).hexdigest()[:16]
@@ -177,7 +208,7 @@ class DockerRunner:
             host = parsed.hostname or base
         except Exception:
             host = base
-        if host in ("localhost", "127.0.0.1", "0.0.0.0"):
+        if host in ("localhost", "127.0.0.1", "0.0.0.0") and self.network_mode != "host":
             verbose_logger.debug(
                 "Detected OpenAI base URL points at localhost (%s). Inside Docker this refers to the container; "
                 "use `HAL_DOCKER_NETWORK_MODE=host` (Linux) or set the base URL to `http://host.docker.internal:<port>`.",
@@ -373,10 +404,15 @@ class DockerRunner:
                         verbose_logger.debug(f"Warning: Failed to copy task file {src_path} to {dest_full_path}: {e}")
 
             # Create runner script
+            weave_project = self._weave_project_for_run(run_id)
+            trace_filename = f"{run_id}_UPLOAD.json"
             script = self._create_runner_script(
                 agent_function=agent_function,
                 task_id=task_id,
-                run_id=run_id
+                run_id=run_id,
+                weave_project=weave_project,
+                weave_op_name=task_id,
+                trace_filename=trace_filename,
             )
                         
             script_path = temp_dir / "run_agent.py"
@@ -574,7 +610,15 @@ class DockerRunner:
                 error_msg = f"Warning: Failed to cleanup for task {task_id}: {e}"
                 verbose_logger.debug(error_msg)
 
-    def _create_runner_script(self, agent_function: str, task_id: str, run_id: str) -> str:
+    def _create_runner_script(
+        self,
+        agent_function: str,
+        task_id: str,
+        run_id: str,
+        weave_project: str,
+        weave_op_name: str,
+        trace_filename: str,
+    ) -> str:
         """
         Create the Python script that will run the agent
         """
@@ -587,6 +631,7 @@ import importlib.util
 import traceback
 import socket
 import urllib.parse
+import re
 
 def _network_preflight() -> None:
     enabled = (os.getenv("HAL_DOCKER_PREFLIGHT_NETWORK") or "").strip().lower() in ("1", "true", "yes")
@@ -625,6 +670,8 @@ def _network_preflight() -> None:
         scheme = "https"
         port = 443
 
+    net_mode = os.getenv("HAL_DOCKER_NETWORK_MODE") or os.getenv("HAL_DOCKER_NETWORK") or "unset"
+    print(f"[hal][docker][preflight] network_mode={{net_mode}}")
     print(f"[hal][docker][preflight] OPENAI_BASE={{base}} host={{host}} port={{port}}")
     print(f"[hal][docker][preflight] HTTPS_PROXY={{_proxy_host('HTTPS_PROXY')}} HTTP_PROXY={{_proxy_host('HTTP_PROXY')}}")
 
@@ -670,7 +717,7 @@ try:
     if weave_available:
         try:
             _try_autopatch()
-            weave.init("{run_id}")
+            weave.init("{weave_project}")
             weave_enabled = True
         except Exception as weave_init_error:
             weave_enabled = False
@@ -700,10 +747,30 @@ try:
     
     # Wrap the agent function in a Weave op so the run produces at least one call record per task.
     if weave_enabled:
-        @weave.op()
+        def _slugify_label(value: str, fallback: str) -> str:
+            value = (value or "").strip()
+            if not value:
+                return fallback
+            value = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_")
+            return value or fallback
+
+        op_label = _slugify_label("{weave_op_name}", "task")
         def _agent_op(_input_data, _agent_args):
             return agent_fn(_input_data, **_agent_args)
-        with weave.attributes({{"weave_task_id": "{task_id}"}}):
+
+        # Avoid relying on weave.op(name=...) across versions: set the function name explicitly.
+        _agent_op.__name__ = op_label
+        _agent_op.__qualname__ = op_label
+        _agent_op = weave.op()(_agent_op)
+
+        with weave.attributes(
+            {{
+                "task_id": "{task_id}",
+                "run_id": "{run_id}",
+                "trace_file": "{trace_filename}",
+                "weave_project": "{weave_project}",
+            }}
+        ):
             result = _agent_op(input_data, agent_args)
     else:
         result = agent_fn(input_data, **agent_args)
