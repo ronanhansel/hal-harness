@@ -23,10 +23,14 @@ def supports_stop_parameter(model_id: str) -> bool:
     
     Not supported with reasoning models openai/o3, openai/o4-mini, and gpt-5 (and their versioned variants).
     """
-    model_name = model_id.split("/")[-1]
-    # o3, o4-mini, and gpt-5 (including versioned variants) don't support stop parameter
-    pattern = r"^(o3[-\d]*|o4-mini[-\d]*|gpt-5[-\d]*)$"
-    return not re.match(pattern, model_name)
+    model_name = model_id.split("/")[-1].lower()
+    if model_name.startswith("gpt-5"):
+        return False
+    if "o4-mini" in model_name:
+        return False
+    if model_name.startswith("o3") and "o3-mini" not in model_name:
+        return False
+    return True
 
 # Replace the function in smolagents
 smolagents.models.supports_stop_parameter = supports_stop_parameter
