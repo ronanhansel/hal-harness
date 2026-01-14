@@ -18,14 +18,28 @@ class CoreBench(BaseBenchmark):
     def __init__(self, agent_dir: str, config: Dict[str, Any]):
         # Set benchmark_name in subclasses
         
-        # Load tasks from core_test.json
-        core_test_path = os.path.join(os.path.dirname(__file__), "corebench", "core_test.json")
+        # Load tasks from core_test.json (optionally overridden for local workflows).
+        override_path = os.environ.get("HAL_COREBENCH_DATASET_PATH")
+        if override_path:
+            core_test_path = os.path.expanduser(override_path)
+            if not os.path.isabs(core_test_path):
+                core_test_path = os.path.abspath(core_test_path)
+        else:
+            core_test_path = os.path.join(os.path.dirname(__file__), "corebench", "core_test.json")
         
-        # Check if core_test.json exists, if not, throw an error with instructions to decrypt
+        # Check if core_test.json exists, if not, throw an error with instructions to decrypt.
         if not os.path.exists(core_test_path):
+            if override_path:
+                raise FileNotFoundError(
+                    "HAL_COREBENCH_DATASET_PATH was set but the file does not exist: "
+                    f"{core_test_path}"
+                )
             encrypted_file = os.path.join(os.path.dirname(__file__), "corebench", "core_test.json.gpg")
             decrypt_command = f"gpg --output {core_test_path} --decrypt {encrypted_file}"
-            raise FileNotFoundError(f"Have you decrypted core_test.json.gpg? Use the following command:\n{decrypt_command}. The password is \"reproducibility\".")
+            raise FileNotFoundError(
+                "Have you decrypted core_test.json.gpg? Use the following command:\n"
+                f"{decrypt_command}. The password is \"reproducibility\"."
+            )
             
         with open(core_test_path, 'r') as f:
             dataset = json.load(f)
