@@ -140,6 +140,15 @@ class DockerRunner:
         # Host python env vars often point to host-only paths and can break container python.
         env.pop("PYTHONPATH", None)
         env.pop("PYTHONHOME", None)
+        # Host conda env vars point to host-only paths and can break conda inside the container.
+        for key in list(env.keys()):
+            upper = key.upper()
+            if upper.startswith("CONDA"):
+                env.pop(key, None)
+            elif upper.startswith("_CE_") or upper.startswith("_CONDA"):
+                env.pop(key, None)
+            elif upper.startswith("MAMBA") or upper.startswith("MICROMAMBA"):
+                env.pop(key, None)
         return env
     
     def _ensure_docker_image(self) -> None:
@@ -294,14 +303,26 @@ class DockerRunner:
         container_id = f"agentrun--{uuid.uuid4()}"[:32].lower().replace("_", "-")
         
         try:
-            # Copy agent code to temp directory
-            temp_agent_dir = temp_dir
-            shutil.copytree(agent_dir, temp_agent_dir, dirs_exist_ok=True)
+            # Mirror a minimal hal-harness agents layout so agent code that expects sibling agents
+            # (e.g. open_deep_research) keeps working inside the container.
+            agent_dir_path = Path(agent_dir).resolve()
+            agent_root = temp_dir / "hal-harness" / "agents"
+            temp_agent_dir = agent_root / agent_dir_path.name
+            temp_agent_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(agent_dir_path, temp_agent_dir, dirs_exist_ok=True)
+
+            sibling_open_deep = agent_dir_path.parent / "open_deep_research"
+            if sibling_open_deep.exists():
+                shutil.copytree(
+                    sibling_open_deep,
+                    agent_root / "open_deep_research",
+                    dirs_exist_ok=True,
+                )
 
             # Write input and args files
-            with open(temp_dir / "input.json", "w") as f:
+            with open(temp_agent_dir / "input.json", "w") as f:
                 json.dump({task_id: input_data}, f)
-            with open(temp_dir / "agent_args.json", "w") as f:
+            with open(temp_agent_dir / "agent_args.json", "w") as f:
                 json.dump(agent_args, f)
 
             # Copy task-specific files if they exist in input_data
@@ -328,9 +349,10 @@ class DockerRunner:
             script_path = temp_dir / "run_agent.py"
             with open(script_path, "w") as f:
                 f.write(script)
+            shutil.copy2(script_path, temp_agent_dir / "run_agent.py")
             
             # create container from image and mount temp dir
-            requirements_path = str(Path(agent_dir) / "requirements.txt")
+            requirements_path = str(agent_dir_path / "requirements.txt")
             prepared_image = self._ensure_prepared_image(requirements_path)
 
             # Pass through host env + .env + per-task overrides so Weave/W&B can upload traces.
@@ -414,7 +436,7 @@ class DockerRunner:
                     env_prefix = " ".join(parts) + " "
 
             proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", container_id, "bash", "-c", f"{env_prefix}cd /workspace && /opt/conda/bin/conda run -n agent_env python run_agent.py",
+                "docker", "exec", container_id, "bash", "-c", f"{env_prefix}cd /workspace/hal-harness/agents/{agent_dir_path.name} && /opt/conda/bin/conda run -n agent_env python run_agent.py",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
