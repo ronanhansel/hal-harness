@@ -23,7 +23,7 @@ verbose_logger = logging.getLogger('agent_eval.verbose')
 # Define the docker image name
 DOCKER_IMAGE_NAME = "hal-agent-runner:latest"
 # Build-time choices for the prepared image. Bump TEMPLATE_VERSION when changing the recipe.
-AGENT_ENV_PYTHON_VERSION = os.getenv("HAL_AGENT_ENV_PYTHON_VERSION") or "3.10"
+AGENT_ENV_PYTHON_VERSION = os.getenv("HAL_AGENT_ENV_PYTHON_VERSION") or "3.11"
 AGENT_ENV_TEMPLATE_VERSION = "2"
 
 class DockerRunner:
