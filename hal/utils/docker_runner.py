@@ -35,6 +35,8 @@ class DockerRunner:
         self.benchmark = benchmark
         self.verbose = False
         self._prepared_image_by_requirements: dict[str, str] = {}
+        self._toolchain_preflight_lock = asyncio.Lock()
+        self._toolchain_preflight_by_image: dict[str, bool] = {}
         # Optional Docker network mode override (e.g. "host") for environments where the
         # default bridge network cannot reach external endpoints.
         self.network_mode: str | None = (
@@ -44,8 +46,12 @@ class DockerRunner:
         )
         self.dotenv_path: str = os.getenv("HAL_DOTENV_PATH") or ".env"
         
-        # Initialize Docker client
-        self.docker_client = docker.from_env()
+        # Initialize Docker client.
+        # NOTE: docker-py does not honor Docker "contexts". If you're using Docker Desktop on macOS
+        # and the SDK can't connect, set `HAL_DOCKER_HOST=unix:///var/run/docker.sock` (or your
+        # desktop socket) to point the SDK at the right daemon.
+        docker_host = os.getenv("HAL_DOCKER_HOST") or os.getenv("DOCKER_HOST")
+        self.docker_client = docker.DockerClient(base_url=docker_host) if docker_host else docker.from_env()
         
         # Check if Docker is available
         self._check_docker_available()
@@ -175,9 +181,61 @@ class DockerRunner:
             version = self.docker_client.version()
             verbose_logger.debug(f"Docker is available: {version.get('Version', 'unknown version')}")
         except docker.errors.DockerException as e:
-            error_message = "Docker is not available on this system. Please install Docker to use the Docker runner."
+            docker_host = os.getenv("HAL_DOCKER_HOST") or os.getenv("DOCKER_HOST") or "unset"
+            error_message = (
+                "Docker is not available to the Python SDK (docker-py), so the Docker runner cannot start containers.\n"
+                f"- docker host (HAL_DOCKER_HOST/DOCKER_HOST): {docker_host}\n"
+                "- Common fixes:\n"
+                "  - Ensure Docker Desktop / dockerd is running.\n"
+                "  - If you can run `docker ps` but the SDK fails, set `HAL_DOCKER_HOST` to the daemon endpoint "
+                "(docker-py does not honor Docker contexts).\n"
+                "  - On Linux, ensure your user is in the `docker` group or run with appropriate privileges.\n"
+            )
             verbose_logger.debug(error_message)
             raise RuntimeError(error_message) from e
+
+    async def _toolchain_preflight(self, container: "docker.models.containers.Container", image_tag: str) -> None:
+        """
+        Verify that baseline reproducibility tools (Rscript/pandoc/TeX) exist in the container image.
+        Runs at most once per prepared image tag per process.
+        """
+        async with self._toolchain_preflight_lock:
+            cached = self._toolchain_preflight_by_image.get(image_tag)
+            if cached is True:
+                return
+            if cached is False:
+                raise RuntimeError(
+                    "Container image failed toolchain preflight previously (R/pandoc/TeX missing). "
+                    "Rebuild the runner image and force rebuild prepared images."
+                )
+
+            # Keep it POSIX-sh compatible and short: just enough to disambiguate missing toolchain.
+            cmd = [
+                "bash",
+                "-lc",
+                "set -e; "
+                "echo '[hal][toolchain] PATH='\"$PATH\"; "
+                "echo '[hal][toolchain] which Rscript:'; command -v Rscript; Rscript --version; "
+                "echo '[hal][toolchain] which pandoc:'; command -v pandoc; pandoc --version | head -n 2; "
+                "echo '[hal][toolchain] which pdflatex:'; (command -v pdflatex && pdflatex --version | head -n 1) || true; "
+                "echo '[hal][toolchain] which latexmk:'; (command -v latexmk && latexmk -v | head -n 1) || true; ",
+            ]
+            try:
+                result = container.exec_run(cmd)
+                out = (result.output or b"").decode(errors="replace")
+                verbose_logger.debug("[hal][toolchain] preflight for image=%s exit=%s\n%s", image_tag, result.exit_code, out)
+                if result.exit_code != 0:
+                    raise RuntimeError(out.strip() or f"toolchain preflight failed (exit {result.exit_code})")
+                self._toolchain_preflight_by_image[image_tag] = True
+            except Exception as e:
+                self._toolchain_preflight_by_image[image_tag] = False
+                raise RuntimeError(
+                    "Missing baseline R/pandoc/TeX toolchain in the container image; this causes widespread "
+                    "CoreBench 'environmental barrier' failures.\n"
+                    "- Rebuild base image: `cd hal-harness && docker build -t hal-agent-runner:latest -f hal/utils/docker/Dockerfile .`\n"
+                    "- Then force rebuild prepared images once: `HAL_DOCKER_FORCE_REBUILD=1`\n"
+                    f"- Preflight error: {e}"
+                ) from e
 
     def _sanitize_forwarded_env(self, env: Dict[str, str]) -> Dict[str, str]:
         keep_tls_overrides = (os.getenv("HAL_DOCKER_KEEP_TLS_ENV") or "").strip().lower() in (
@@ -495,6 +553,10 @@ class DockerRunner:
             
             # Add container to active list
             self._active_containers.append(container_id)
+
+            # Fail fast if the prepared image is missing baseline tooling (Rscript/pandoc/TeX).
+            # This avoids running agent logic that will inevitably error with "Rscript: not found".
+            await self._toolchain_preflight(container, prepared_image)
             
             # Using asyncio subprocess instead of subprocess.run
             # copy all the contents of temp dir into container
