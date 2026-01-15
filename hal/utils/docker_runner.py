@@ -170,39 +170,58 @@ class DockerRunner:
                     + "\n",
                     encoding="utf-8",
                 )
-                build_kwargs = {
-                    "path": str(build_dir),
-                    "tag": tag,
-                    "decode": True,
-                }
                 build_args: Dict[str, str] = {}
                 for key in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"):
                     val = os.getenv(key)
                     if val:
                         build_args[key] = val
-                if build_args:
-                    build_kwargs["buildargs"] = build_args
 
+                build_stream = self.docker_client.api.build(
+                    path=str(build_dir),
+                    tag=tag,
+                    decode=True,
+                    buildargs=build_args or None,
+                )
+                log_lines: list[str] = []
+                error_message: Optional[str] = None
                 try:
-                    _, build_logs = self.docker_client.images.build(**build_kwargs)
-                except docker.errors.BuildError as e:
-                    log_lines: list[str] = []
-                    for log in (e.build_log or []):
-                        if "stream" in log:
-                            log_lines.append(log["stream"].rstrip())
-                        elif "error" in log:
-                            log_lines.append(log["error"].rstrip())
+                    for chunk in build_stream:
+                        if not isinstance(chunk, dict):
+                            continue
+                        if "stream" in chunk:
+                            line = str(chunk["stream"]).rstrip()
+                            log_lines.append(line)
+                            verbose_logger.debug(line)
+                        if "errorDetail" in chunk:
+                            detail = chunk.get("errorDetail") or {}
+                            if isinstance(detail, dict):
+                                error_message = str(detail.get("message") or detail).strip()
+                            else:
+                                error_message = str(detail).strip()
+                            log_lines.append(error_message)
+                        if "error" in chunk:
+                            error_message = str(chunk["error"]).strip()
+                            log_lines.append(error_message)
+                except Exception as e:
+                    # If docker-py errors while streaming, log what we have and raise.
+                    tail = "\n".join(log_lines[-200:])
+                    verbose_logger.debug("Prepared image build stream failed for %s\n%s", tag, tail)
+                    raise RuntimeError(
+                        "Prepared image build failed while streaming logs; "
+                        "set HAL_DOCKER_PREPARED_IMAGE_KEEP=1 and inspect the build dir."
+                    ) from e
+
+                if error_message:
                     tail = "\n".join(log_lines[-200:])
                     verbose_logger.debug("Prepared image build failed for %s\n%s", tag, tail)
                     raise RuntimeError(
-                        "Prepared image build failed; see verbose logs for details. "
+                        f"Prepared image build failed: {error_message}. "
                         "Common causes: proxy settings not forwarded, or dependency wheels "
                         "incompatible with the selected python version."
-                    ) from e
+                    )
 
-                for log in build_logs:
-                    if "stream" in log:
-                        verbose_logger.debug(log["stream"].strip())
+                # Verify the image exists after build.
+                self.docker_client.images.get(tag)
                 self._prepared_image_by_requirements[req_hash] = tag
                 return tag
             finally:
