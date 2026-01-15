@@ -22,6 +22,9 @@ verbose_logger = logging.getLogger('agent_eval.verbose')
 
 # Define the docker image name
 DOCKER_IMAGE_NAME = "hal-agent-runner:latest"
+# Build-time choices for the prepared image. Bump TEMPLATE_VERSION when changing the recipe.
+AGENT_ENV_PYTHON_VERSION = os.getenv("HAL_AGENT_ENV_PYTHON_VERSION") or "3.10"
+AGENT_ENV_TEMPLATE_VERSION = "2"
 
 class DockerRunner:
     """Handles running agents in Docker containers for isolation"""
@@ -96,7 +99,13 @@ class DockerRunner:
             base_image_id = self.docker_client.images.get(DOCKER_IMAGE_NAME).id.encode("utf-8")
         except Exception:
             base_image_id = b"unknown-base-image"
-        return hashlib.sha256(req_bytes + b"\n" + base_image_id).hexdigest()[:16]
+        recipe = (
+            f"template={AGENT_ENV_TEMPLATE_VERSION}\n"
+            f"python={AGENT_ENV_PYTHON_VERSION}\n"
+            "weave=0.51.41\n"
+            "wandb=0.17.9\n"
+        ).encode("utf-8")
+        return hashlib.sha256(req_bytes + b"\n" + base_image_id + b"\n" + recipe).hexdigest()[:16]
 
     def _ensure_prepared_image(self, requirements_path: str) -> str:
         """
@@ -152,7 +161,7 @@ class DockerRunner:
                             "COPY requirements.txt /tmp/requirements.txt",
                             "RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main \\",
                             " && conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r \\",
-                            " && conda create -y -n agent_env python=3.12 \\",
+                            f" && conda create -y -n agent_env python={AGENT_ENV_PYTHON_VERSION} \\",
                             " && conda run -n agent_env python -m pip install -U pip \\",
                             " && conda run -n agent_env pip install -r /tmp/requirements.txt \\",
                             " && conda run -n agent_env pip install weave==0.51.41 'gql<4' wandb==0.17.9",
@@ -215,6 +224,9 @@ class DockerRunner:
                 "-lc",
                 "set -e; "
                 "echo '[hal][toolchain] PATH='\"$PATH\"; "
+                "echo '[hal][toolchain] PATH contains /opt/conda/bin:'; "
+                "(echo \"$PATH\" | tr ':' '\\n' | grep -qx '/opt/conda/bin' && echo yes) "
+                "|| (echo no; exit 2); "
                 "echo '[hal][toolchain] which Rscript:'; command -v Rscript; Rscript --version; "
                 "echo '[hal][toolchain] which pandoc:'; command -v pandoc; pandoc --version | head -n 2; "
                 "echo '[hal][toolchain] which pdflatex:'; (command -v pdflatex && pdflatex --version | head -n 1) || true; "
@@ -263,6 +275,35 @@ class DockerRunner:
             elif upper.startswith("MAMBA") or upper.startswith("MICROMAMBA"):
                 env.pop(key, None)
         return env
+
+    def _default_container_path(self) -> str:
+        """
+        Provide a stable PATH inside containers.
+
+        Why:
+        - Some shells (via BASH_ENV/conda.sh) prepend /opt/conda/condabin but do not guarantee /opt/conda/bin
+          is present unless an environment is activated.
+        - Many CoreBench repos call tools like `Rscript`, `pandoc`, `jupyter`, etc. via PATH.
+        """
+        parts = [
+            "/opt/conda/envs/agent_env/bin",
+            "/opt/conda/bin",
+            "/opt/conda/condabin",
+            "/usr/local/sbin",
+            "/usr/local/bin",
+            "/usr/sbin",
+            "/usr/bin",
+            "/sbin",
+            "/bin",
+        ]
+        # Keep order but avoid duplicates
+        seen = set()
+        out: list[str] = []
+        for p in parts:
+            if p not in seen:
+                out.append(p)
+                seen.add(p)
+        return ":".join(out)
 
     def _maybe_warn_about_openai_base_url(self, env: Dict[str, str]) -> None:
         base = (
@@ -347,6 +388,37 @@ class DockerRunner:
             run_dir = benchmark.get_run_dir(run_id) if benchmark else f"results/{run_id}"
             os.makedirs(run_dir, exist_ok=True)
             submissions_file = os.path.join(run_dir, f"{run_id}_RAW_SUBMISSIONS.jsonl")
+
+            # Fail fast once per run if the prepared image is missing baseline tooling (Rscript/pandoc/TeX).
+            # This avoids burning time and tokens across many tasks that would all error with the same barrier.
+            try:
+                agent_dir_path = Path(agent_dir).resolve()
+                requirements_path = str(agent_dir_path / "requirements.txt")
+                prepared_image = self._ensure_prepared_image(requirements_path)
+                if self._toolchain_preflight_by_image.get(prepared_image) is not True:
+                    preflight_container_id = f"agentpreflight--{uuid.uuid4()}"[:32].lower().replace("_", "-")
+                    preflight_env = {
+                        "PATH": self._default_container_path(),
+                        "BASH_ENV": "/opt/conda/etc/profile.d/conda.sh",
+                    }
+                    preflight_container = self.docker_client.containers.run(
+                        image=prepared_image,
+                        name=preflight_container_id,
+                        detach=True,
+                        command=["tail", "-f", "/dev/null"],
+                        environment=preflight_env,
+                        network_mode=self.network_mode,
+                    )
+                    try:
+                        await self._toolchain_preflight(preflight_container, prepared_image)
+                    finally:
+                        try:
+                            preflight_container.remove(force=True)
+                        except Exception:
+                            pass
+            except Exception:
+                # Let the underlying toolchain preflight error message propagate.
+                raise
             
             tasks = []
             for task_id, input_data in dataset.items():
@@ -514,6 +586,9 @@ class DockerRunner:
             # Make `conda activate ...` work in non-interactive bash sessions started by tools.
             env_vars.setdefault("BASH_ENV", "/opt/conda/etc/profile.d/conda.sh")
             env_vars = self._sanitize_forwarded_env(env_vars)
+            # Ensure common toolchains (R/pandoc/LaTeX/jupyter) and the prepared `agent_env` are discoverable via PATH.
+            # This avoids widespread "Rscript: not found" environmental barrier failures caused by PATH mismatches.
+            env_vars["PATH"] = self._default_container_path()
             self._maybe_warn_about_openai_base_url(env_vars)
 
             # Provide a stable way for containers to reach host-local services (e.g. a local OpenAI/LiteLLM proxy).
@@ -571,6 +646,23 @@ class DockerRunner:
                     verbose_logger.debug(f"Container {container_id}: {stdout.decode()}")
             if stderr:
                 verbose_logger.debug(f"Container {container_id}: {stderr.decode()}")
+
+            # Make both `./results` (from /workspace/environment) and `../results` resolve to a writable location.
+            # Many CoreBench tasks mention ../results but also instruct agents not to write to parent dirs; a stable
+            # symlink reduces spurious permission/path failures.
+            try:
+                container.exec_run(
+                    [
+                        "bash",
+                        "-lc",
+                        "set -e; "
+                        "mkdir -p /workspace/results /workspace/environment; "
+                        "chmod -R a+rwx /workspace/results || true; "
+                        "if [ ! -e /workspace/environment/results ]; then ln -s /workspace/results /workspace/environment/results; fi; ",
+                    ]
+                )
+            except Exception:
+                pass
             
             # run setup script if it exists
             if self.benchmark and self.benchmark.setup_script:
@@ -866,14 +958,15 @@ try:
         _agent_op.__qualname__ = op_label
         _agent_op = weave.op()(_agent_op)
 
-        with weave.attributes(
-            {{
-                "task_id": "{task_id}",
-                "run_id": "{run_id}",
-                "trace_file": "{trace_filename}",
-                "weave_project": "{weave_project}",
-            }}
-        ):
+         with weave.attributes(
+             {{
+                 "weave_task_id": "{task_id}",
+                 "task_id": "{task_id}",
+                 "run_id": "{run_id}",
+                 "trace_file": "{trace_filename}",
+                 "weave_project": "{weave_project}",
+             }}
+         ):
             result = _agent_op(input_data, agent_args)
     else:
         result = agent_fn(input_data, **agent_args)

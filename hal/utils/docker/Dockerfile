@@ -26,11 +26,13 @@ ENV PATH /opt/conda/bin:$PATH
 RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main \
  && conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r \
  && conda install -y -n base -c conda-forge \
-      r-base=4.* \
-      pandoc \
-      r-knitr \
-      r-rmarkdown \
-      texlive-core \
+	      r-base=4.* \
+	      pandoc \
+	      r-knitr \
+	      r-rmarkdown \
+	      jupyter \
+	      nbconvert \
+	      texlive-core \
  && conda clean -afy
 
 # Provide a harmless default for optional API-based tools
