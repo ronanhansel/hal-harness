@@ -1012,7 +1012,7 @@ try:
         _agent_op.__qualname__ = op_label
         _agent_op = weave.op()(_agent_op)
 
-         with weave.attributes(
+        with weave.attributes(
              {{
                  "weave_task_id": "{task_id}",
                  "task_id": "{task_id}",
