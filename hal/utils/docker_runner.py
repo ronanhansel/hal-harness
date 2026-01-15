@@ -170,14 +170,49 @@ class DockerRunner:
                     + "\n",
                     encoding="utf-8",
                 )
-                _, build_logs = self.docker_client.images.build(path=str(build_dir), tag=tag)
+                build_kwargs = {
+                    "path": str(build_dir),
+                    "tag": tag,
+                    "decode": True,
+                }
+                build_args: Dict[str, str] = {}
+                for key in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"):
+                    val = os.getenv(key)
+                    if val:
+                        build_args[key] = val
+                if build_args:
+                    build_kwargs["buildargs"] = build_args
+
+                try:
+                    _, build_logs = self.docker_client.images.build(**build_kwargs)
+                except docker.errors.BuildError as e:
+                    log_lines: list[str] = []
+                    for log in (e.build_log or []):
+                        if "stream" in log:
+                            log_lines.append(log["stream"].rstrip())
+                        elif "error" in log:
+                            log_lines.append(log["error"].rstrip())
+                    tail = "\n".join(log_lines[-200:])
+                    verbose_logger.debug("Prepared image build failed for %s\n%s", tag, tail)
+                    raise RuntimeError(
+                        "Prepared image build failed; see verbose logs for details. "
+                        "Common causes: proxy settings not forwarded, or dependency wheels "
+                        "incompatible with the selected python version."
+                    ) from e
+
                 for log in build_logs:
                     if "stream" in log:
                         verbose_logger.debug(log["stream"].strip())
                 self._prepared_image_by_requirements[req_hash] = tag
                 return tag
             finally:
-                shutil.rmtree(build_dir, ignore_errors=True)
+                keep_build_dir = (os.getenv("HAL_DOCKER_PREPARED_IMAGE_KEEP") or "").strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                )
+                if not keep_build_dir:
+                    shutil.rmtree(build_dir, ignore_errors=True)
         finally:
             try:
                 lock_handle.close()
