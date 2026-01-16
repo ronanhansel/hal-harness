@@ -23,8 +23,9 @@ verbose_logger = logging.getLogger('agent_eval.verbose')
 # Define the docker image name
 DOCKER_IMAGE_NAME = "hal-agent-runner:latest"
 # Build-time choices for the prepared image. Bump TEMPLATE_VERSION when changing the recipe.
-AGENT_ENV_PYTHON_VERSION = os.getenv("HAL_AGENT_ENV_PYTHON_VERSION") or "3.11"
-AGENT_ENV_TEMPLATE_VERSION = "2"
+# IMPORTANT: appworld requires Python >= 3.11 as of Jan 2026
+AGENT_ENV_PYTHON_VERSION = "3.11"  # Hardcoded to ensure Python 3.11 is always used
+AGENT_ENV_TEMPLATE_VERSION = "6"  # v6: + matplotlib, numpy, pandas, scipy, scikit-learn, seaborn
 
 class DockerRunner:
     """Handles running agents in Docker containers for isolation"""
