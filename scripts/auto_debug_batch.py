@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from hal.debugger.inspector_pipeline import InspectorPipeline
 from hal.debugger.log_reader import LogIngester
 from hal.debugger.pipeline_logger import PipelineRunLogger
-from hal.debugger.runner_pipeline import RunnerPipeline
 
 LOGGER = logging.getLogger("hal.auto_debug")
 HAL_HARNESS_DIR = Path(__file__).resolve().parents[1]
@@ -264,6 +263,7 @@ def _build_pipeline(args: argparse.Namespace, agent_args: Optional[Dict[str, Any
             reasoning_effort=args.reasoning_effort,
             inspector_model=getattr(args, "inspector_model", None),
         )
+    from hal.debugger.runner_pipeline import RunnerPipeline
     return RunnerPipeline(
         **common_kwargs,
         trace_output_root=trace_output_root,

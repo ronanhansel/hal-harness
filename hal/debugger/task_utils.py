@@ -6,8 +6,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-from datasets import load_dataset
-
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_BENCHMARK = "swebench_verified"
@@ -74,6 +72,8 @@ def _load_dataset_index(benchmark_name: str) -> Dict[str, Dict[str, Any]]:
 
     if benchmark_name not in _BENCHMARK_DATASETS:
         raise ValueError(f"Unsupported benchmark '{benchmark_name}'")
+
+    from datasets import load_dataset  # type: ignore
 
     dataset_name, split = _BENCHMARK_DATASETS[benchmark_name]
     LOGGER.debug("Loading dataset %s (%s)", dataset_name, split)

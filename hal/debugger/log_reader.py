@@ -82,6 +82,11 @@ class LogIngester:
         if trace_path is None:
             fallback = self._load_from_trace_json(model_run, task_id)
             if fallback:
+                LOGGER.info(
+                    "Using JSON trace fallback for run=%s task=%s",
+                    model_run,
+                    task_id,
+                )
                 return fallback
             LOGGER.warning(
                 "Trace file missing for run=%s task=%s (searched %s)",
@@ -123,13 +128,16 @@ class LogIngester:
         if not filtered:
             return ""
         latest = filtered[-1]
-        message = latest.get("output", {}).get("choices") or []
-        if message:
-            choice = message[-1]
-            content = choice.get("message") or {}
-            text = content.get("content")
-            if isinstance(text, str):
-                return text.strip()
+        output = latest.get("output")
+        if isinstance(output, dict):
+            choices = output.get("choices") or []
+            if choices:
+                choice = choices[-1] if isinstance(choices, list) else None
+                if isinstance(choice, dict):
+                    content = choice.get("message") or {}
+                    text = content.get("content")
+                    if isinstance(text, str):
+                        return text.strip()
         output_text = latest.get("output_text")
         if isinstance(output_text, str):
             return output_text.strip()
