@@ -1,8 +1,9 @@
 import os
+import json
 import time
 import shutil
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
 from datasets import load_dataset
 import docker
 
@@ -11,18 +12,35 @@ from .base_benchmark import BaseBenchmark
 
 class SciCodeBenchmark(BaseBenchmark):
     """SciCode benchmark implementation"""
-    
+
     def __init__(self, agent_dir: str, config: Dict[str, Any], benchmark_name: str = 'scicode'):
         self.benchmark_name = benchmark_name
         self.requires_sandbox = False
         super().__init__(agent_dir, config, requires_sandbox=self.requires_sandbox)
-        
-        # Load the dataset.
-        self.dataset = list(load_dataset("SciCode1/SciCode", split="test"))
+
+        # Load the dataset - check for custom path first
+        self.dataset = self._load_dataset(config)
         self.benchmark = {task['problem_id']: task for task in self.dataset}
 
         # Set benchmark directory.
         self.benchmark_dir = os.path.join(os.path.dirname(__file__), 'SciCode')
+
+    def _load_dataset(self, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Load dataset from custom path or HuggingFace."""
+        # Check environment variable first
+        custom_path = os.environ.get("SCICODE_DATASET_PATH")
+
+        # Also check config for dataset_path
+        if not custom_path and config:
+            custom_path = config.get("dataset_path")
+
+        if custom_path and os.path.exists(custom_path):
+            print(f"Loading SciCode dataset from custom path: {custom_path}")
+            with open(custom_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+
+        # Default: load from HuggingFace
+        return list(load_dataset("SciCode1/SciCode", split="test"))
         
     def evaluate_output(self, agent_output: Dict[str, Any], run_id: str) -> Dict[str, Any]:
         """Run SciCode evaluation harness on agent outputs"""

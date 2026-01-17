@@ -12,6 +12,9 @@ warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValu
 warnings.filterwarnings("ignore", message=".*Use 'content=<...>' to upload raw bytes/text content.*", category=DeprecationWarning)
 warnings.filterwarnings("ignore", message=".*deprecated.*", module="weave.trace_server.trace_server_interface")
 
+# Get the directory where this script is located (for resolving relative paths)
+SCRIPT_DIR = Path(__file__).resolve().parent
+
 def run(input: dict[str, Any], **kwargs) -> dict[str, str]:
 
     assert 'model_name' in kwargs, 'model_name is required'
@@ -104,11 +107,11 @@ def run(input: dict[str, Any], **kwargs) -> dict[str, str]:
 
     # Load the prompt template based on the benchmark name
     if benchmark_name == 'scicode_hard':
-        prompt_template = Path("hard_prompt_template.txt").read_text()
+        prompt_template = (SCRIPT_DIR / "hard_prompt_template.txt").read_text()
     elif benchmark_name == 'scicode_easy':
-        prompt_template = Path("easy_prompt_template.txt").read_text()
+        prompt_template = (SCRIPT_DIR / "easy_prompt_template.txt").read_text()
     else:
-        prompt_template = Path("prompt_template.txt").read_text()
+        prompt_template = (SCRIPT_DIR / "prompt_template.txt").read_text()
 
     # For the hard benchmark, generate full prompt once for each problem
     if benchmark_name == 'scicode_hard':
@@ -145,7 +148,7 @@ def run(input: dict[str, Any], **kwargs) -> dict[str, str]:
 
             for i in range(steps):
                 if (task_id == "13" and i == 5) or (task_id == "62" and i == 0) or (task_id == "76" and i == 2):
-                    step_code = Path(f"{task_id}.{i + 1}.txt").read_text(encoding='utf-8')
+                    step_code = (SCRIPT_DIR / f"{task_id}.{i + 1}.txt").read_text(encoding='utf-8')
                     previous_llm_code.append(step_code)
                     full_code += f'\n{step_code}'
                     steps_results[f'{task_id}.{i + 1}'] = full_code

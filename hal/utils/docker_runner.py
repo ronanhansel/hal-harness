@@ -85,6 +85,10 @@ class DockerRunner:
         return "benchmark"
 
     def _weave_project_for_run(self, run_id: str) -> str:
+        # Allow explicit override via environment variable
+        override = os.environ.get("HAL_WEAVE_PROJECT")
+        if override:
+            return override
         prefix = self._infer_prefix_from_run_id(run_id)
         benchmark = self._infer_benchmark_from_run_id(run_id)
         return f"{prefix}_{benchmark}"

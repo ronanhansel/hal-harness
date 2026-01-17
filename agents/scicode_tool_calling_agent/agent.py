@@ -8,13 +8,16 @@ import re
 def supports_stop_parameter(model_id: str) -> bool:
     """
     Check if the model supports the `stop` parameter.
-    
+
     Not supported with reasoning models openai/o3, openai/o4-mini, and gpt-5 (and their versioned variants).
     """
     model_name = model_id.split("/")[-1]
+    # Normalize: replace underscores with dashes for consistent matching
+    model_name = model_name.replace("_", "-")
     # o3, o4-mini, and gpt-5 (including versioned variants) don't support stop parameter
-    pattern = r"^(o3[-\d]*|o4-mini[-\d]*|gpt-5[-\d]*)$"
-    return not re.match(pattern, model_name)
+    # Pattern matches: o3, o3-2025-04-16, o4-mini, o4-mini-2025-04-16, gpt-5, etc.
+    pattern = r"^(o[34](-mini)?|gpt-5)([-\d].*)?$"
+    return not re.match(pattern, model_name, re.IGNORECASE)
 
 # Replace the function in smolagents
 smolagents.models.supports_stop_parameter = supports_stop_parameter
@@ -198,12 +201,16 @@ def get_agent(model_params) -> CodeAgent:
     model = LiteLLMModel(**model_params)
 
     # Create a CodeAgent instance with the specified model
+    # Note: The local Python executor has AST-based limitations:
+    # - No @ operator (use np.dot instead)
+    # - Limited context manager support (avoid np.errstate)
+    # - Some numpy/scipy features may not work in the interpreter but will work in final evaluation
     agent = CodeAgent(
         tools=[
             RateLimitAwareDuckDuckGoSearchTool(),
             PythonInterpreterTool(),
             ModifiedWikipediaSearchTool(),
-            FinalAnswerTool(description = "Produce the final answer to the problem as a code chunk with function described in the problem description. Your response should focus exclusively on implementing the solution for the next step, adhering closely to the specified function header and the context provided by the initial steps. Your response should NOT include the dependencies and functions of all previous steps. If your next step function calls functions from previous steps, please make sure it uses the headers provided without modification. DO NOT generate EXAMPLE USAGE OR TEST CODE in your response. Please make sure your response python code in format of ```python```. THIS IS EXTREMELY IMPORTANT! DO NOT SUBMIT A RESPONSE THAT IS NOT A VALID PYTHON CODE BLOCK!\n\nIMPORTANT COMPATIBILITY NOTES:\n- scipy.integrate.simps has been deprecated. Use scipy.integrate.simpson instead.\n- Always use numpy arrays for numerical computations.\n- If you need to use dir() or slice(), they are available as builtin functions.\n- Handle matrix operations carefully and implement missing functionality when needed.")
+            FinalAnswerTool(description = "Produce the final answer to the problem as a code chunk with function described in the problem description. Your response should focus exclusively on implementing the solution for the next step, adhering closely to the specified function header and the context provided by the initial steps. Your response should NOT include the dependencies and functions of all previous steps. If your next step function calls functions from previous steps, please make sure it uses the headers provided without modification. DO NOT generate EXAMPLE USAGE OR TEST CODE in your response. Please make sure your response python code in format of ```python```. THIS IS EXTREMELY IMPORTANT! DO NOT SUBMIT A RESPONSE THAT IS NOT A VALID PYTHON CODE BLOCK!\n\nIMPORTANT COMPATIBILITY NOTES:\n- scipy.integrate.simps has been deprecated. Use scipy.integrate.simpson instead.\n- Always use numpy arrays for numerical computations.\n- Use np.dot(A, B) instead of A @ B for matrix multiplication (the @ operator is not supported in the testing environment).\n- Avoid using np.errstate context manager - handle edge cases with explicit conditionals instead.\n- If you need to use dir() or slice(), they are available as builtin functions.\n- The python_interpreter tool has limitations - if code fails there but looks correct, submit it anyway as the final evaluation environment is different.")
         ],
         additional_authorized_imports=AUTHORIZED_IMPORTS,
         model=model,

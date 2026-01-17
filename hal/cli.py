@@ -359,19 +359,22 @@ def is_inspect_solver(agent_function: str, agent_dir: str) -> bool:
 def validate_model_pricing(model_name: str) -> None:
     """Validate that model pricing information exists"""
     from .utils.weave_utils import MODEL_PRICES_DICT
-    
+
+    # Check HAL_PRICING_MODEL_NAME env var first (allows decoupling pricing key from API model_id)
+    pricing_model = os.getenv("HAL_PRICING_MODEL_NAME") or model_name
+
     # together_ai is not part of weave model name
-    model_name = model_name.replace("together_ai/", "")
-    
-    if model_name not in MODEL_PRICES_DICT:
+    pricing_model = pricing_model.replace("together_ai/", "")
+
+    if pricing_model not in MODEL_PRICES_DICT:
         if os.getenv("HAL_STRICT_MODEL_PRICING", "").strip() in {"1", "true", "yes"}:
             print_error(
-                f"Model '{model_name}' not found in pricing dictionary. "
+                f"Model '{pricing_model}' not found in pricing dictionary. "
                 "Add pricing info to MODEL_PRICES_DICT in weave_utils.py, or unset HAL_STRICT_MODEL_PRICING to skip."
             )
             sys.exit(1)
         print_warning(
-            f"Model '{model_name}' not found in pricing dictionary. "
+            f"Model '{pricing_model}' not found in pricing dictionary. "
             "Continuing without cost validation (set HAL_STRICT_MODEL_PRICING=1 to enforce)."
         )
 
