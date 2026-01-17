@@ -1,9 +1,32 @@
 import os
+import ast
 from smolagents import LiteLLMModel, CodeAgent, Tool, DuckDuckGoSearchTool, PythonInterpreterTool, FinalAnswerTool
 import time
 
 import smolagents.models
+import smolagents.local_python_executor as executor_module
 import re
+
+# Store the original evaluate_binop function
+_original_evaluate_binop = executor_module.evaluate_binop
+
+def _patched_evaluate_binop(binop, state, static_tools, custom_tools, authorized_imports):
+    """
+    Patched version of evaluate_binop that adds support for the @ (MatMult) operator.
+    This fixes tasks 28, 71 which use matrix multiplication with numpy arrays.
+    """
+    # First try the MatMult operator
+    if isinstance(binop.op, ast.MatMult):
+        left_val = executor_module.evaluate_ast(binop.left, state, static_tools, custom_tools, authorized_imports)
+        right_val = executor_module.evaluate_ast(binop.right, state, static_tools, custom_tools, authorized_imports)
+        # Use numpy's matmul for the @ operator
+        import numpy as np
+        return np.matmul(left_val, right_val)
+    # Fall back to original implementation for other operators
+    return _original_evaluate_binop(binop, state, static_tools, custom_tools, authorized_imports)
+
+# Replace the function in smolagents local_python_executor
+executor_module.evaluate_binop = _patched_evaluate_binop
 
 def supports_stop_parameter(model_id: str) -> bool:
     """
@@ -33,8 +56,25 @@ AUTHORIZED_IMPORTS = [
     "cmath",
     "collections",
     "functools",
-    "numpy.*",
-    "scipy.*",
+    "heapq",  # For priority queue operations (task 35)
+    "queue",  # Alternative for priority queues
+    # Numpy - explicit to work with smolagents interpreter
+    "numpy",
+    "numpy.linalg",
+    "numpy.fft",
+    "numpy.random",  # For random number generation (task 80 - Andersen thermostat)
+    # Scipy - must list explicit submodules for interpreter
+    "scipy",
+    "scipy.integrate",
+    "scipy.optimize",
+    "scipy.linalg",
+    "scipy.sparse",
+    "scipy.sparse.linalg",
+    "scipy.special",
+    "scipy.signal",
+    "scipy.interpolate",
+    "scipy.constants",
+    # Other
     "mpl_toolkits.mplot3d",
     "sympy",
     "builtins.dir",
@@ -201,22 +241,49 @@ def get_agent(model_params) -> CodeAgent:
     model = LiteLLMModel(**model_params)
 
     # Create a CodeAgent instance with the specified model
-    # Note: The local Python executor has AST-based limitations:
-    # - No @ operator (use np.dot instead)
-    # - Limited context manager support (avoid np.errstate)
-    # - Some numpy/scipy features may not work in the interpreter but will work in final evaluation
+    # Note: The local Python executor is patched to support:
+    # - @ operator for matrix multiplication (via numpy.matmul)
+    # - numpy.random for stochastic simulations
+    # - heapq for priority queue operations
     agent = CodeAgent(
         tools=[
             RateLimitAwareDuckDuckGoSearchTool(),
-            PythonInterpreterTool(),
+            PythonInterpreterTool(authorized_imports=AUTHORIZED_IMPORTS),
             ModifiedWikipediaSearchTool(),
-            FinalAnswerTool(description = "Produce the final answer to the problem as a code chunk with function described in the problem description. Your response should focus exclusively on implementing the solution for the next step, adhering closely to the specified function header and the context provided by the initial steps. Your response should NOT include the dependencies and functions of all previous steps. If your next step function calls functions from previous steps, please make sure it uses the headers provided without modification. DO NOT generate EXAMPLE USAGE OR TEST CODE in your response. Please make sure your response python code in format of ```python```. THIS IS EXTREMELY IMPORTANT! DO NOT SUBMIT A RESPONSE THAT IS NOT A VALID PYTHON CODE BLOCK!\n\nIMPORTANT COMPATIBILITY NOTES:\n- scipy.integrate.simps has been deprecated. Use scipy.integrate.simpson instead.\n- Always use numpy arrays for numerical computations.\n- Use np.dot(A, B) instead of A @ B for matrix multiplication (the @ operator is not supported in the testing environment).\n- Avoid using np.errstate context manager - handle edge cases with explicit conditionals instead.\n- If you need to use dir() or slice(), they are available as builtin functions.\n- The python_interpreter tool has limitations - if code fails there but looks correct, submit it anyway as the final evaluation environment is different.")
+            FinalAnswerTool(description = """Submit your final Python function implementation.
+
+CRITICAL FORMAT REQUIREMENTS:
+1. Your response MUST follow this exact format:
+   Thought: I will submit the final implementation.
+   Code:
+   ```py
+   final_answer(\"\"\"
+   def function_name(...):
+       # Your implementation here
+       return result
+   \"\"\")
+   ```<end_code>
+
+2. The argument to final_answer() must be the Python function code as a string - NOT prose or explanations.
+
+3. Do NOT include:
+   - Example usage or test code
+   - Dependencies or imports (they are provided separately)
+   - Functions from previous steps (use headers as provided)
+   - Explanatory text outside the function
+
+COMPATIBILITY NOTES:
+- Use scipy.integrate.simpson (not simps - deprecated)
+- Use numpy.trapezoid (not trapz - deprecated)
+- You can use @ for matrix multiplication
+- You can use numpy.random and heapq""")
         ],
         additional_authorized_imports=AUTHORIZED_IMPORTS,
         model=model,
         planning_interval=3,
         max_steps=5,
-        verbosity_level=2
+        verbosity_level=2,
+        code_block_tags="markdown",  # Use ```python blocks instead of <code> tags
     )
 
     return agent
