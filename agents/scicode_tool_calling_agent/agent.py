@@ -7,7 +7,31 @@ import smolagents.models
 import smolagents.local_python_executor as executor_module
 import re
 
+# ============================================================================
+# SCIPY COMPATIBILITY SHIM
+# The SciCode benchmark uses deprecated scipy.integrate.simps but modern scipy
+# only has scipy.integrate.simpson. Add simps as an alias to prevent errors.
+# This fixes task 12 and other tasks that use Simpson's rule integration.
+# ============================================================================
+try:
+    from scipy import integrate
+    if not hasattr(integrate, 'simps'):
+        integrate.simps = integrate.simpson
+except ImportError:
+    pass
+
+# Also add numpy.trapz alias for compatibility (deprecated in favor of numpy.trapezoid)
+try:
+    import numpy as np
+    if not hasattr(np, 'trapz') and hasattr(np, 'trapezoid'):
+        np.trapz = np.trapezoid
+except ImportError:
+    pass
+
+# ============================================================================
+# MATMULT OPERATOR PATCH
 # Store the original evaluate_binop function
+# ============================================================================
 _original_evaluate_binop = executor_module.evaluate_binop
 
 def _patched_evaluate_binop(binop, state, static_tools, custom_tools, authorized_imports):

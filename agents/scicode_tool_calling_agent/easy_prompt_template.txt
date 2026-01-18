@@ -13,6 +13,12 @@ DEPENDENCIES:
 Use only the following dependencies in your solution. Do not include these dependencies at the beginning of your code.
 {dependencies}
 
+COMPATIBILITY NOTES:
+- For quantum computing tasks (density matrices, Kraus operators, etc.), use dtype=complex for all arrays to avoid casting errors between float64 and complex128.
+- Use scipy.integrate.simpson (not simps - deprecated).
+- Use np.trapezoid (not np.trapz - deprecated).
+- You can use @ for matrix multiplication.
+
 RESPONSE GUIDELINES:
 1. Start with the scientific background required for the next step, formatted as a comment.
 2. Then write the complete and executable Python program for the next step in a single block.

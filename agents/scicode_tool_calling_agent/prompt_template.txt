@@ -24,6 +24,12 @@ Approach the problem using the following steps:
 4. If there are any issues with this unit test, try to re-write the function to address those issues. Do not attempt to write nested functions when trying to debug your function.
 5. Your final function should be as simple as possible while fully addressing the prompt.
 
+COMPATIBILITY NOTES:
+- For quantum computing tasks (density matrices, Kraus operators, etc.), use dtype=complex for all arrays to avoid casting errors between float64 and complex128.
+- Use scipy.integrate.simpson (not simps - deprecated).
+- Use np.trapezoid (not np.trapz - deprecated).
+- You can use @ for matrix multiplication.
+
 RESPONSE GUIDELINES:
 1. Write the complete and executable Python program for the next step in a single block.
 3. Your response should focus exclusively on implementing the solution for the next step, adhering closely to the specified function header and the context provided by the initial steps.
