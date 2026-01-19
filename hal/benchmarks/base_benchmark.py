@@ -92,7 +92,9 @@ class BaseBenchmark(ABC):
                     task_metrics[task_id] = task_data["metrics"]
 
         # Get cost and usage metrics
-        if weave_client is not None:
+        # Skip slow Weave downloads if HAL_SKIP_WEAVE_DOWNLOAD is set (traces can be fetched later)
+        skip_weave_download = os.environ.get("HAL_SKIP_WEAVE_DOWNLOAD", "").strip().lower() in ("1", "true", "yes")
+        if weave_client is not None and not skip_weave_download:
             try:
                 total_cost, total_usage = get_total_cost(weave_client)
             except Exception as exc:
@@ -104,6 +106,8 @@ class BaseBenchmark(ABC):
                 print_warning(f"Failed to fetch Weave traces; continuing without them: {exc}")
                 raw_logging, latency_dict = [], {}
         else:
+            if skip_weave_download and weave_client is not None:
+                print_warning("Skipping Weave trace download (HAL_SKIP_WEAVE_DOWNLOAD=true). Fetch traces later with merge_traces.py")
             total_cost, total_usage = 0.0, {}
             raw_logging, latency_dict = [], {}
 

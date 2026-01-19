@@ -661,6 +661,31 @@ class DockerRunner:
             if disable_host_gateway:
                 extra_hosts = None
 
+            # Mount Azure CLI credentials if available (for direct Azure access)
+            volumes = {}
+            azure_dir = os.path.expanduser("~/.azure")
+            if os.path.isdir(azure_dir) and env_vars.get("USE_DIRECT_AZURE", "").lower() == "true":
+                volumes[azure_dir] = {"bind": "/root/.azure", "mode": "ro"}
+                # Set HOME=/root so SharedTokenCacheCredential finds the mounted Azure credentials
+                env_vars["HOME"] = "/root"
+                verbose_logger.debug(f"Mounting Azure credentials from {azure_dir}")
+                # Remove proxy URLs so the agent uses direct Azure instead of LiteLLM proxy
+                for key in ("OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENAI_API_BASE_URL", "LITELLM_BASE_URL"):
+                    env_vars.pop(key, None)
+                # Pre-fetch a fresh Azure AD token on the host and pass it to the container
+                # This avoids needing az CLI in the container
+                try:
+                    from azure.identity import AzureCliCredential, get_bearer_token_provider
+                    scope = env_vars.get("TRAPI_SCOPE", "api://trapi/.default")
+                    credential = AzureCliCredential()
+                    token_provider = get_bearer_token_provider(credential, scope)
+                    token = token_provider()
+                    env_vars["AZURE_OPENAI_AD_TOKEN"] = token
+                    verbose_logger.debug(f"Pre-fetched Azure AD token (length: {len(token)})")
+                except Exception as e:
+                    verbose_logger.debug(f"Could not pre-fetch Azure AD token: {e}")
+                verbose_logger.debug("Removed proxy URLs for direct Azure access")
+
             try:
                 container = self.docker_client.containers.run(
                     image=prepared_image,
@@ -670,6 +695,7 @@ class DockerRunner:
                     environment=env_vars,
                     network_mode=self.network_mode,
                     extra_hosts=extra_hosts,
+                    volumes=volumes if volumes else None,
                 )
             except docker.errors.APIError as e:
                 # Some Docker engines don't support host-gateway; retry without it.
@@ -681,6 +707,7 @@ class DockerRunner:
                         command=["tail", "-f", "/dev/null"],
                         environment=env_vars,
                         network_mode=self.network_mode,
+                        volumes=volumes if volumes else None,
                     )
                 else:
                     raise

@@ -12,6 +12,11 @@ import json
 import os
 import types
 
+# Add the directory containing this file to sys.path for local imports (e.g., azure_direct_model)
+_this_dir = Path(__file__).resolve().parent
+if str(_this_dir) not in sys.path:
+    sys.path.insert(0, str(_this_dir))
+
 from typing import Optional
 
 try:
@@ -98,31 +103,11 @@ except ImportError:
     from model_prices import MODEL_PRICES_DICT
 
 AUTHORIZED_IMPORTS = [
-    "requests",
-    "zipfile",
+    # === Core Python modules ===
     "os",
-    "pandas",
-    "numpy.*",
-    "sympy",
-    "json",
-    "bs4",
-    "pubchempy",
-    "xml",
-    "yahoo_finance",
-    "Bio",
-    "sklearn",
-    "scipy.*",
-    "pydub",
-    "io",
-    "PIL",
-    "chess",
-    "PyPDF2",
-    "pptx",
-    "torch",
-    "datetime",
-    "fractions",
-    "csv",
+    "sys",
     "time",
+    "datetime",
     "pickle",
     "itertools",
     "random",
@@ -131,9 +116,148 @@ AUTHORIZED_IMPORTS = [
     "cmath",
     "collections",
     "functools",
+    "heapq",
+    "queue",
+    "io",
+    "re",
+    "json",
+    "csv",
+    "zipfile",
+    "pathlib",
+    "glob",
+    "shutil",
+    "struct",
+    "typing",
+    "warnings",
+    "logging",
+    "builtins.dir",
+    "builtins.slice",
+    "unicodedata",
+    "stat",
+
+    # === Numpy - explicit submodules for smolagents interpreter ===
+    "numpy", "numpy.*",
+    "numpy.linalg",
+    "numpy.fft",
+    "numpy.random",
+    "numpy.ma",
+    "numpy.polynomial",
+
+    # === Scipy - explicit submodules for smolagents interpreter ===
+    "scipy", "scipy.*",
+    "scipy.integrate",
+    "scipy.optimize",
+    "scipy.linalg",
+    "scipy.sparse",
+    "scipy.sparse.linalg",
+    "scipy.special",
+    "scipy.signal",
+    "scipy.interpolate",
+    "scipy.constants",
+    "scipy.stats",
+    "scipy.ndimage",
+    "scipy.io",
+    "scipy.fft",
+    "scipy.spatial",
+
+    # === Data Science Core ===
+    "pandas", "pandas.*",
+    "sympy", "sympy.*",
+    "sklearn", "sklearn.*", "scikit-learn",
+    "statsmodels", "statsmodels.*",
+    "statistics",
+    "fractions",
+
+    # === Visualization ===
+    "matplotlib", "matplotlib.*",
+    "mpl_toolkits", "mpl_toolkits.*",
     "mpl_toolkits.mplot3d",
-    "sympy",
-    ]
+    "seaborn", "seaborn.*",
+    "plotly", "plotly.*",
+    "PIL", "PIL.*", "pillow",
+
+    # === Deep Learning ===
+    "torch", "torch.*", "pytorch",
+    "tensorflow", "tensorflow.*", "tf",
+    "keras", "keras.*",
+    "dgl", "dgl.*",
+    "transformers", "transformers.*",
+
+    # === Single-cell / Bioinformatics ===
+    "scanpy", "scanpy.*",
+    "anndata", "anndata.*",
+    "mudata", "mudata.*",
+    "muon", "muon.*",
+    "squidpy", "squidpy.*",
+    "leidenalg", "leidenalg.*",
+    "igraph", "igraph.*",
+    "Bio", "Bio.*", "biopython",
+
+    # === Neuroimaging / Biosignals ===
+    "mne", "mne.*",
+    "neurokit2", "neurokit2.*", "nk",
+    "biopsykit", "biopsykit.*",
+
+    # === Chemistry / Materials Science ===
+    "rdkit", "rdkit.*",
+    "deepchem", "deepchem.*", "dc",
+    "pubchempy", "pubchempy.*",
+    "pymatgen", "pymatgen.*",
+    "matminer", "matminer.*",
+    "modnet", "modnet.*",
+    "mastml", "mastml.*",
+    "DeepPurpose", "DeepPurpose.*",
+    "descriptastorus", "descriptastorus.*",
+
+    # === Molecular Dynamics / Structural Biology ===
+    "MDAnalysis", "MDAnalysis.*",
+    "prolif", "prolif.*",
+
+    # === Geospatial / Climate ===
+    "oggm", "oggm.*",
+    "iris", "iris.*",
+    "cartopy", "cartopy.*",
+    "rasterio", "rasterio.*",
+    "geopandas", "geopandas.*", "gpd",
+    "xarray", "xarray.*", "xr",
+    "netCDF4", "netCDF4.*",
+    "shapely", "shapely.*",
+    "fiona", "fiona.*",
+    "pyproj", "pyproj.*",
+    "geoplot", "geoplot.*",
+    "eofs", "eofs.*",
+
+    # === File Formats ===
+    "h5py", "h5py.*",
+    "tables", "tables.*", "pytables",
+    "openpyxl", "openpyxl.*",
+    "xlrd", "xlrd.*",
+    "PyPDF2", "PyPDF2.*",
+    "pptx", "pptx.*",
+    "xml", "xml.*",
+
+    # === Web / API ===
+    "requests", "requests.*",
+    "urllib", "urllib.*",
+    "bs4", "bs4.*",
+    "aiohttp", "aiohttp.*",
+
+    # === Misc Scientific ===
+    "networkx", "networkx.*", "nx",
+    "graph_tool", "graph_tool.*",
+    "pydub", "pydub.*",
+    "chess", "chess.*",
+    "yahoo_finance", "yahoo_finance.*",
+    "cv2", "opencv-python",
+    "skimage", "skimage.*", "scikit-image",
+    "imageio", "imageio.*",
+
+    # === Cognitive Modeling ===
+    "ccobra", "ccobra.*",
+
+    # === ML / Boosting ===
+    "catboost", "catboost.*",
+]
 
 
 def save_agent_steps(agent, kwargs, response, sample):
@@ -709,6 +833,21 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
     BUDGET = kwargs['budget'] if 'budget' in kwargs else None
     
     import litellm
+    # Configure retry behavior for connection errors (e.g., when proxy restarts)
+    # Default 35 retries with exponential backoff = ~5 minutes of retry time
+    litellm.num_retries = int(os.environ.get('LITELLM_NUM_RETRIES', 35))
+    litellm.request_timeout = int(os.environ.get('LITELLM_REQUEST_TIMEOUT', 600))
+    # Retry on connection errors and rate limits
+    litellm.retry = True
+    # Drop unsupported params for different models
+    litellm.drop_params = True
+
+    # Enable Azure AD authentication if AZURE_AD_TOKEN_PROVIDER is set
+    # This uses DefaultAzureCredential (az login) to get tokens
+    if os.environ.get('AZURE_AD_TOKEN_PROVIDER', '').lower() == 'true':
+        litellm.enable_azure_ad_token_refresh = True
+        print("[INFO] Azure AD token refresh enabled - using DefaultAzureCredential")
+
     model_params = {}
     # `model_name` is used for pricing + reporting; `api_model_id` can override the actual ID sent to the API.
     model_params['model_id'] = kwargs.get('api_model_id') or kwargs['model_name']
@@ -739,7 +878,16 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
         model_params['model_id'] = kwargs['model_name'].replace('together_ai/', 'openai/')
         model_params['api_key'] = os.environ.get("TOGETHERAI_API_KEY")
         model_params['api_base'] = "https://api.together.xyz/v1"
-        
+
+    # Direct Azure OpenAI configuration (bypasses LiteLLM proxy)
+    # Set AZURE_AD_TOKEN_PROVIDER=true and AZURE_API_BASE in .env
+    if 'azure/' in kwargs['model_name'] and os.environ.get('AZURE_API_BASE'):
+        model_params['api_base'] = os.environ.get('AZURE_API_BASE')
+        model_params['api_version'] = os.environ.get('AZURE_API_VERSION', '2024-10-21')
+        # Use dummy key - Azure AD auth handles authentication
+        model_params['api_key'] = os.environ.get('OPENAI_API_KEY', 'dummy')
+        print(f"[INFO] Using direct Azure: {model_params['api_base']} with model {kwargs['model_name']}")
+
     task_id, task = list(input.items())[0]
     
     results = {}
@@ -792,7 +940,27 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
         # Non-fatal: if litellm is unavailable or wrapping fails, continue without provider pinning
         print(f"[WARNING] Failed to enable OpenRouter provider pinning: {e}")
 
-    model = LiteLLMModel(**model_params)
+    # Add retry settings to model params for connection error handling
+    # Default 35 retries = ~5 minutes of retry time
+    model_params['num_retries'] = int(os.environ.get('LITELLM_NUM_RETRIES', 35))
+    model_params['timeout'] = int(os.environ.get('LITELLM_REQUEST_TIMEOUT', 600))
+
+    # Use direct Azure if enabled (faster, no proxy overhead)
+    if os.environ.get('USE_DIRECT_AZURE', '').lower() == 'true':
+        try:
+            from azure_direct_model import AzureDirectModel
+            print(f"[INFO] Using AzureDirectModel for direct TRAPI access")
+            model = AzureDirectModel(
+                model_id=model_params.get('model_id', kwargs['model_name']),
+                temperature=model_params.get('temperature', 0.7),
+                num_retries=model_params.get('num_retries', 5),
+                **{k: v for k, v in kwargs.items() if k in ['reasoning_effort']}
+            )
+        except Exception as e:
+            print(f"[WARNING] Failed to use AzureDirectModel: {e}. Falling back to LiteLLMModel.")
+            model = LiteLLMModel(**model_params)
+    else:
+        model = LiteLLMModel(**model_params)
     
     CORE_TOOLS = [
         # DuckDuckGoSearchTool(),

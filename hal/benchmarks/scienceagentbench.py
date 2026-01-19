@@ -9,8 +9,9 @@ import sys
 import time
 from pathlib import Path
 
-# get the relative path of the directory where this file is located
-this_file_dir = os.path.dirname(os.path.relpath(__file__)).replace('\\', '/')
+# get the ABSOLUTE path of the directory where this file is located
+# Using absolute paths ensures file copying works regardless of current working directory
+this_file_dir = os.path.dirname(os.path.abspath(__file__))
 benchmark_path = os.path.join(this_file_dir, 'scienceagentbench', 'ScienceAgentBench', 'benchmark')
 
 submodule_path = os.path.join(this_file_dir, "scienceagentbench", "ScienceAgentBench")
@@ -42,7 +43,13 @@ class ScienceAgentBench(BaseBenchmark):
     def __init__(self, agent_dir: str, config: Dict[str, Any]):
         self.benchmark_name = "scienceagentbench"
 
-        ds = load_dataset("osunlp/ScienceAgentBench", split="validation")
+        # Support loading from local JSON file (for fix runner) or HuggingFace
+        dataset_path = os.environ.get("SCIENCEAGENTBENCH_DATASET_PATH")
+        if dataset_path and os.path.exists(dataset_path):
+            with open(dataset_path, "r") as f:
+                ds = json.load(f)
+        else:
+            ds = load_dataset("osunlp/ScienceAgentBench", split="validation")
         self.benchmark = {}
 
         for task in ds:
@@ -51,10 +58,15 @@ class ScienceAgentBench(BaseBenchmark):
             for key in task:
                 self.benchmark[task_id][key] = task[key]
 
-            dataset_path = os.path.join("benchmark/datasets/", task["dataset_folder_tree"].split("\n")[0][4:])
-            src_dataset_path = os.path.join(submodule_path, dataset_path)
+            # Extract the dataset folder from the tree (e.g., "biosignals/" from "|-- biosignals/")
+            dataset_folder = task["dataset_folder_tree"].split("\n")[0][4:]
+            # Source path is in the submodule's benchmark/datasets/ directory
+            src_dataset_path = os.path.join(submodule_path, "benchmark/datasets/", dataset_folder)
+            # Destination path must be under "environment/" because docker_runner creates
+            # /workspace/environment and run_agent.py changes cwd to it
+            dest_dataset_path = os.path.join("environment/benchmark/datasets/", dataset_folder)
             self.benchmark[task_id]['files'] = {
-                dataset_path: src_dataset_path,
+                dest_dataset_path: src_dataset_path,
             }
 
         # Optional: Set if benchmark requires VM execution
@@ -67,16 +79,25 @@ class ScienceAgentBench(BaseBenchmark):
         """Evaluate agent solutions"""
         self._recover_pred_from_log(agent_output, run_id)
         result_path = self._call_docker_eval(run_id)
+
+        # Get task IDs in sorted order (matching how run_evaluation.py writes results)
+        task_ids = sorted(self.benchmark.keys(), key=lambda x: int(x) if x.isdigit() else float('inf'))
+
         with open(result_path, "r") as f:
             result = {}
-            for idx, line in enumerate(f, start=1):
-                if line.strip() == '':
-                    #raise ValueError("Empty line in evaluation results. This may be because the docker evaluation is not complete.")
-                    result[str(idx)] = {'valid_program': 0, 'codebert_score': 0, 'success_rate': 0, 'log_info': ''}
+            lines = f.readlines()
+            for i, task_id in enumerate(task_ids):
+                if i < len(lines):
+                    line = lines[i]
+                    if line.strip() == '':
+                        result[task_id] = {'valid_program': 0, 'codebert_score': 0, 'success_rate': 0, 'log_info': ''}
+                    else:
+                        instance_result = json.loads(line)
+                        result[task_id] = instance_result
                 else:
-                    instance_result = json.loads(line)
-                    result[str(idx)] = instance_result
-        
+                    # Missing result for this task
+                    result[task_id] = {'valid_program': 0, 'codebert_score': 0, 'success_rate': 0, 'log_info': ''}
+
         return {'agent_output': agent_output, 'eval_result': result}
         
     def get_metrics(self, eval_results: Dict[str, Any]) -> Dict[str, Any]:
@@ -86,8 +107,11 @@ class ScienceAgentBench(BaseBenchmark):
 
         run_log = []
         eval_log = []
-        for idx in range(1, len(self.benchmark) + 1):
-            if agent_output[str(idx)] == "TIMEOUT after 900 seconds" or agent_output[str(idx)] == "TIMEOUT after 7200 seconds":
+        # Iterate over actual task IDs in benchmark (not assuming sequential 1..N)
+        # Sort numerically to maintain consistent ordering
+        task_ids = sorted(self.benchmark.keys(), key=lambda x: int(x) if x.isdigit() else float('inf'))
+        for task_id in task_ids:
+            if agent_output[task_id] == "TIMEOUT after 900 seconds" or agent_output[task_id] == "TIMEOUT after 7200 seconds":
                 run_log.append({
                     "history": [
                         {
@@ -98,8 +122,8 @@ class ScienceAgentBench(BaseBenchmark):
                     "cost": 0.0 # need to rely on weave log for accurate cost
                 })
             else:
-                run_log.append(agent_output[str(idx)])
-            eval_log.append(eval_result[str(idx)])
+                run_log.append(agent_output[task_id])
+            eval_log.append(eval_result[task_id])
         
         metrics = evaluate_best_run([run_log], [eval_log])
         return metrics
@@ -112,8 +136,11 @@ class ScienceAgentBench(BaseBenchmark):
 
         all_data = agent_output
         with open(log_fname, "w") as f:
-            for idx in range(1, len(self.benchmark) + 1):
-                if all_data[str(idx)] == "TIMEOUT after 900 seconds" or all_data[str(idx)] == "TIMEOUT after 7200 seconds":
+            # Iterate over actual task IDs in benchmark (not assuming sequential 1..N)
+            # Sort numerically to maintain consistent ordering
+            task_ids = sorted(self.benchmark.keys(), key=lambda x: int(x) if x.isdigit() else float('inf'))
+            for task_id in task_ids:
+                if all_data[task_id] == "TIMEOUT after 900 seconds" or all_data[task_id] == "TIMEOUT after 7200 seconds":
                     f.write(json.dumps(
                         {
                             "history": [
@@ -126,7 +153,7 @@ class ScienceAgentBench(BaseBenchmark):
                         }
                     ) + "\n")
                 else:
-                    f.write(json.dumps(all_data[str(idx)]) + "\n")
+                    f.write(json.dumps(all_data[task_id]) + "\n")
 
         args.log_fname = log_fname
         args.pred_program_path = os.path.join(self.get_run_dir(run_id), "pred_programs")
@@ -145,13 +172,16 @@ class ScienceAgentBench(BaseBenchmark):
 
         log_fname = os.path.join(self.get_run_dir(run_id), f"{run_id}_eval.jsonl")
 
+        # Only evaluate the tasks that are in the (possibly filtered) benchmark
+        task_ids = list(self.benchmark.keys())
+
         docker_eval.main(  # TODO: These arguments are not configurable right now
             benchmark_path=benchmark_path,
             pred_program_path=os.path.join(self.get_run_dir(run_id), "pred_programs"),
             log_fname=log_fname,
             dataset_name='osunlp/ScienceAgentBench',
             split='validation',
-            instance_ids=None,
+            instance_ids=task_ids,
             max_workers=os.cpu_count() // 2,
             force_rebuild=True,
             cache_level="none",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import types
 from dataclasses import dataclass
@@ -9,23 +10,56 @@ from typing import Any, Dict, Optional, Callable
 
 verbose_logger = logging.getLogger('agent_eval.verbose')
 
-# Conservative list of retryable errors. We will have to expand this list over time.
+# List of retryable errors - be generous to handle transient failures
 RETRYABLE_ERRORS = [
     "overloaded_error",
     "rate limit",
-    "overload", 
+    "overload",
     "request timeout",
     "rate_limit_error",
     "429 Too Many Requests",
+    "connection error",
+    "connection reset",
+    "connection refused",
+    "timeout",
+    "timed out",
+    "503",
+    "502",
+    "500",
+    "server error",
+    "service unavailable",
+    "bad gateway",
+    "internal server error",
+    "temporarily unavailable",
+    "try again",
+    "retry",
+    "econnreset",
+    "econnrefused",
+    "etimedout",
 ]
+
+
+def _get_default_max_retries() -> int:
+    """Get max retries from env or default to 120 (~2 hours with 60s max delay)."""
+    return int(os.environ.get('HAL_RETRY_MAX_RETRIES', 120))
+
+
+def _get_default_max_delay() -> float:
+    """Get max delay from env or default to 60s."""
+    return float(os.environ.get('HAL_RETRY_MAX_DELAY', 60.0))
 
 
 @dataclass
 class RetryConfig:
-    max_retries: int = 3
+    max_retries: int = 120  # ~2 hours with 60s max delay
     base_delay: float = 1.0
     max_delay: float = 60.0
     jitter: bool = True
+
+    def __post_init__(self):
+        # Allow environment variable overrides
+        self.max_retries = int(os.environ.get('HAL_RETRY_MAX_RETRIES', self.max_retries))
+        self.max_delay = float(os.environ.get('HAL_RETRY_MAX_DELAY', self.max_delay))
 
 
 class RetryHandler:

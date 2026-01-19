@@ -70,8 +70,11 @@ def supports_stop_parameter(model_id: str) -> bool:
 smolagents.models.supports_stop_parameter = supports_stop_parameter
 
 AUTHORIZED_IMPORTS = [
+    # === Core Python modules ===
     "os",
+    "sys",
     "time",
+    "datetime",
     "pickle",
     "itertools",
     "random",
@@ -82,13 +85,33 @@ AUTHORIZED_IMPORTS = [
     "functools",
     "heapq",  # For priority queue operations (task 35)
     "queue",  # Alternative for priority queues
-    # Numpy - explicit to work with smolagents interpreter
-    "numpy",
+    "io",
+    "re",
+    "json",
+    "csv",
+    "zipfile",
+    "pathlib",
+    "glob",
+    "shutil",
+    "struct",
+    "typing",
+    "warnings",
+    "logging",
+    "builtins.dir",
+    "builtins.slice",
+    "unicodedata",
+    "stat",
+
+    # === Numpy - explicit submodules for smolagents interpreter ===
+    "numpy", "numpy.*",
     "numpy.linalg",
     "numpy.fft",
     "numpy.random",  # For random number generation (task 80 - Andersen thermostat)
-    # Scipy - must list explicit submodules for interpreter
-    "scipy",
+    "numpy.ma",
+    "numpy.polynomial",
+
+    # === Scipy - explicit submodules for smolagents interpreter ===
+    "scipy", "scipy.*",
     "scipy.integrate",
     "scipy.optimize",
     "scipy.linalg",
@@ -98,11 +121,101 @@ AUTHORIZED_IMPORTS = [
     "scipy.signal",
     "scipy.interpolate",
     "scipy.constants",
-    # Other
+    "scipy.stats",
+    "scipy.ndimage",
+    "scipy.io",
+    "scipy.fft",
+    "scipy.spatial",
+
+    # === Data Science Core ===
+    "pandas", "pandas.*",
+    "sympy", "sympy.*",
+    "sklearn", "sklearn.*", "scikit-learn",
+    "statsmodels", "statsmodels.*",
+    "statistics",
+    "fractions",
+
+    # === Visualization ===
+    "matplotlib", "matplotlib.*",
+    "mpl_toolkits", "mpl_toolkits.*",
     "mpl_toolkits.mplot3d",
-    "sympy",
-    "builtins.dir",
-    "builtins.slice"
+    "seaborn", "seaborn.*",
+    "plotly", "plotly.*",
+    "PIL", "PIL.*", "pillow",
+
+    # === Deep Learning ===
+    "torch", "torch.*", "pytorch",
+    "tensorflow", "tensorflow.*", "tf",
+    "keras", "keras.*",
+    "dgl", "dgl.*",
+    "transformers", "transformers.*",
+
+    # === Single-cell / Bioinformatics ===
+    "scanpy", "scanpy.*",
+    "anndata", "anndata.*",
+    "mudata", "mudata.*",
+    "muon", "muon.*",
+    "squidpy", "squidpy.*",
+    "leidenalg", "leidenalg.*",
+    "igraph", "igraph.*",
+    "Bio", "Bio.*", "biopython",
+
+    # === Neuroimaging / Biosignals ===
+    "mne", "mne.*",
+    "neurokit2", "neurokit2.*", "nk",
+    "biopsykit", "biopsykit.*",
+
+    # === Chemistry / Materials Science ===
+    "rdkit", "rdkit.*",
+    "deepchem", "deepchem.*", "dc",
+    "pubchempy", "pubchempy.*",
+    "pymatgen", "pymatgen.*",
+    "matminer", "matminer.*",
+    "modnet", "modnet.*",
+    "mastml", "mastml.*",
+    "DeepPurpose", "DeepPurpose.*",
+    "descriptastorus", "descriptastorus.*",
+
+    # === Molecular Dynamics / Structural Biology ===
+    "MDAnalysis", "MDAnalysis.*",
+    "prolif", "prolif.*",
+
+    # === Geospatial / Climate ===
+    "oggm", "oggm.*",
+    "iris", "iris.*",
+    "cartopy", "cartopy.*",
+    "rasterio", "rasterio.*",
+    "geopandas", "geopandas.*", "gpd",
+    "xarray", "xarray.*", "xr",
+    "netCDF4", "netCDF4.*",
+    "shapely", "shapely.*",
+    "fiona", "fiona.*",
+    "pyproj", "pyproj.*",
+
+    # === File Formats ===
+    "h5py", "h5py.*",
+    "tables", "tables.*", "pytables",
+    "openpyxl", "openpyxl.*",
+    "xlrd", "xlrd.*",
+    "PyPDF2", "PyPDF2.*",
+    "pptx", "pptx.*",
+    "xml", "xml.*",
+
+    # === Web / API ===
+    "requests", "requests.*",
+    "urllib", "urllib.*",
+    "bs4", "bs4.*",
+    "aiohttp", "aiohttp.*",
+
+    # === Misc Scientific ===
+    "networkx", "networkx.*", "nx",
+    "graph_tool", "graph_tool.*",
+    "pydub", "pydub.*",
+    "chess", "chess.*",
+    "yahoo_finance", "yahoo_finance.*",
+    "cv2", "opencv-python",
+    "skimage", "skimage.*", "scikit-image",
+    "imageio", "imageio.*",
 ]
 
 class ModifiedWikipediaSearchTool(Tool):
