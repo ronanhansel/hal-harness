@@ -55,7 +55,12 @@ class DockerRunner:
         # and the SDK can't connect, set `HAL_DOCKER_HOST=unix:///var/run/docker.sock` (or your
         # desktop socket) to point the SDK at the right daemon.
         docker_host = os.getenv("HAL_DOCKER_HOST") or os.getenv("DOCKER_HOST")
-        self.docker_client = docker.DockerClient(base_url=docker_host) if docker_host else docker.from_env()
+        # Increase timeout for high-concurrency scenarios (default is 60s)
+        docker_timeout = int(os.getenv("HAL_DOCKER_TIMEOUT", "600"))
+        if docker_host:
+            self.docker_client = docker.DockerClient(base_url=docker_host, timeout=docker_timeout)
+        else:
+            self.docker_client = docker.from_env(timeout=docker_timeout)
         
         # Check if Docker is available
         self._check_docker_available()
@@ -689,6 +694,9 @@ class DockerRunner:
                     verbose_logger.debug(f"Could not pre-fetch Azure AD token: {e}")
                 verbose_logger.debug("Removed proxy URLs for direct Azure access")
 
+            # Add tmpfs mount for /tmp to fix Azure CLI issues in container
+            tmpfs = {"/tmp": "size=1G,mode=1777"}
+
             try:
                 container = self.docker_client.containers.run(
                     image=prepared_image,
@@ -699,6 +707,7 @@ class DockerRunner:
                     network_mode=self.network_mode,
                     extra_hosts=extra_hosts,
                     volumes=volumes if volumes else None,
+                    tmpfs=tmpfs,
                 )
             except docker.errors.APIError as e:
                 # Some Docker engines don't support host-gateway; retry without it.
@@ -711,6 +720,7 @@ class DockerRunner:
                         environment=env_vars,
                         network_mode=self.network_mode,
                         volumes=volumes if volumes else None,
+                        tmpfs=tmpfs,
                     )
                 else:
                     raise

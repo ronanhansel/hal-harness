@@ -76,9 +76,12 @@ class AzureModel(Model):
         request_params = {
             "model": self.deployment_name,
             "messages": messages,
-            "temperature": kwargs.get("temperature", self.temperature),
             "max_tokens": kwargs.get("max_tokens", self.max_tokens),
         }
+
+        # Temperature (not supported by all models)
+        if self._supports_temperature():
+            request_params["temperature"] = kwargs.get("temperature", self.temperature)
 
         # Handle stop sequences (not supported by some reasoning models)
         if stop_sequences and self._supports_stop():
@@ -99,11 +102,21 @@ class AzureModel(Model):
     def _supports_stop(self) -> bool:
         """Check if model supports stop parameter."""
         model_lower = self.model_id.lower()
-        # Reasoning models don't support stop
-        if model_lower.startswith("o3") and "o3-mini" not in model_lower:
+        # O-series reasoning models don't support stop
+        if model_lower.startswith("o1") or model_lower.startswith("o3") or model_lower.startswith("o4"):
             return False
-        if "o4-mini" in model_lower:
+        # GPT-5 models don't support stop
+        if model_lower.startswith("gpt-5"):
             return False
+        return True
+
+    def _supports_temperature(self) -> bool:
+        """Check if model supports temperature parameter."""
+        model_lower = self.model_id.lower()
+        # O-series models don't support temperature
+        if model_lower.startswith("o1") or model_lower.startswith("o3") or model_lower.startswith("o4"):
+            return False
+        # GPT-5 models also don't support temperature (or only support default value)
         if model_lower.startswith("gpt-5"):
             return False
         return True

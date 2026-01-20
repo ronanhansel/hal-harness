@@ -418,11 +418,10 @@ class AzureDirectModel(Model):
     def _supports_stop(self) -> bool:
         """Check if model supports stop parameter."""
         model_lower = self.model_id.lower()
-        # O-series reasoning models (except o3-mini) don't support stop
-        if model_lower.startswith("o3") and "o3-mini" not in model_lower:
+        # O-series reasoning models don't support stop
+        if model_lower.startswith("o1") or model_lower.startswith("o3") or model_lower.startswith("o4"):
             return False
-        if "o4-mini" in model_lower:
-            return False
+        # GPT-5 models don't support stop
         if model_lower.startswith("gpt-5"):
             return False
         return True
@@ -432,6 +431,9 @@ class AzureDirectModel(Model):
         model_lower = self.model_id.lower()
         # O-series models don't support temperature
         if model_lower.startswith("o1") or model_lower.startswith("o3") or model_lower.startswith("o4"):
+            return False
+        # GPT-5 models also don't support temperature (or only support default value)
+        if model_lower.startswith("gpt-5"):
             return False
         return True
 
