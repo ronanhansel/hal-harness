@@ -432,11 +432,7 @@ class AzureDirectModel(Model):
         # O-series models don't support temperature
         if model_lower.startswith("o1") or model_lower.startswith("o3") or model_lower.startswith("o4"):
             return False
-<<<<<<< Updated upstream
-        # GPT-5 models also don't support temperature (or only support default value)
-=======
         # GPT-5 models only support temperature=1 (default), so don't pass it
->>>>>>> Stashed changes
         if model_lower.startswith("gpt-5"):
             return False
         return True
