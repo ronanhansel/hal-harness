@@ -130,7 +130,7 @@ AUTHORIZED_IMPORTS = [
     # === Data Science Core ===
     "pandas", "pandas.*",
     "sympy", "sympy.*",
-    "sklearn", "sklearn.*", "scikit-learn",
+    "sklearn", "sklearn.*",  # scikit-learn imports as sklearn
     "statsmodels", "statsmodels.*",
     "statistics",
     "fractions",
@@ -141,64 +141,51 @@ AUTHORIZED_IMPORTS = [
     "mpl_toolkits.mplot3d",
     "seaborn", "seaborn.*",
     "plotly", "plotly.*",
-    "PIL", "PIL.*", "pillow",
+    "PIL", "PIL.*",  # pillow imports as PIL
 
     # === Deep Learning ===
-    "torch", "torch.*", "pytorch",
-    "tensorflow", "tensorflow.*", "tf",
-    "keras", "keras.*",
-    "dgl", "dgl.*",
+    "torch", "torch.*",  # pytorch package imports as torch
     "transformers", "transformers.*",
+    "dgl", "dgl.*",
 
     # === Single-cell / Bioinformatics ===
     "scanpy", "scanpy.*",
     "anndata", "anndata.*",
     "mudata", "mudata.*",
     "muon", "muon.*",
-    "squidpy", "squidpy.*",
     "leidenalg", "leidenalg.*",
     "igraph", "igraph.*",
-    "Bio", "Bio.*", "biopython",
+    "Bio", "Bio.*",  # biopython imports as Bio
 
     # === Neuroimaging / Biosignals ===
     "mne", "mne.*",
-    "neurokit2", "neurokit2.*", "nk",
+    "neurokit2", "neurokit2.*",
     "biopsykit", "biopsykit.*",
 
     # === Chemistry / Materials Science ===
     "rdkit", "rdkit.*",
-    "deepchem", "deepchem.*", "dc",
+    "deepchem", "deepchem.*",
     "pubchempy", "pubchempy.*",
     "pymatgen", "pymatgen.*",
-    "matminer", "matminer.*",
-    "modnet", "modnet.*",
-    "mastml", "mastml.*",
-    "DeepPurpose", "DeepPurpose.*",
-    "descriptastorus", "descriptastorus.*",
 
     # === Molecular Dynamics / Structural Biology ===
     "MDAnalysis", "MDAnalysis.*",
     "prolif", "prolif.*",
 
     # === Geospatial / Climate ===
-    "oggm", "oggm.*",
-    "iris", "iris.*",
+    "iris", "iris.*",  # scitools-iris imports as iris
     "cartopy", "cartopy.*",
-    "rasterio", "rasterio.*",
-    "geopandas", "geopandas.*", "gpd",
-    "xarray", "xarray.*", "xr",
+    "geopandas", "geopandas.*",
+    "xarray", "xarray.*",
     "netCDF4", "netCDF4.*",
     "shapely", "shapely.*",
-    "fiona", "fiona.*",
     "pyproj", "pyproj.*",
 
     # === File Formats ===
     "h5py", "h5py.*",
-    "tables", "tables.*", "pytables",
+    "tables", "tables.*",  # PyTables imports as tables
     "openpyxl", "openpyxl.*",
     "xlrd", "xlrd.*",
-    "PyPDF2", "PyPDF2.*",
-    "pptx", "pptx.*",
     "xml", "xml.*",
 
     # === Web / API ===
@@ -208,13 +195,9 @@ AUTHORIZED_IMPORTS = [
     "aiohttp", "aiohttp.*",
 
     # === Misc Scientific ===
-    "networkx", "networkx.*", "nx",
-    "graph_tool", "graph_tool.*",
-    "pydub", "pydub.*",
-    "chess", "chess.*",
-    "yahoo_finance", "yahoo_finance.*",
-    "cv2", "opencv-python",
-    "skimage", "skimage.*", "scikit-image",
+    "networkx", "networkx.*",
+    "cv2",  # opencv-python-headless imports as cv2
+    "skimage", "skimage.*",  # scikit-image imports as skimage
     "imageio", "imageio.*",
 ]
 
@@ -367,15 +350,30 @@ class RateLimitAwareDuckDuckGoSearchTool(Tool):
 def get_agent(model_params) -> CodeAgent:
     """
     Returns a CodeAgent with the specified model name.
-    
+
     Args:
         model_name (str): The name of the model to use.
-        
+
     Returns:
         CodeAgent: An instance of CodeAgent configured with the specified model.
     """
-    # Initialize the LiteLLMModel with the specified model name
-    model = LiteLLMModel(**model_params)
+    # Initialize model - use AzureDirectModel if USE_DIRECT_AZURE is set
+    if os.environ.get('USE_DIRECT_AZURE', '').lower() == 'true':
+        try:
+            from azure_direct_model import AzureDirectModel
+            print(f"[INFO] Using AzureDirectModel for direct TRAPI access")
+            model = AzureDirectModel(
+                model_id=model_params.get('model_id', 'gpt-4o'),
+                temperature=model_params.get('temperature', 0.7),
+                max_tokens=model_params.get('max_tokens', 4096),
+                num_retries=model_params.get('num_retries', 500),
+                timeout=model_params.get('timeout', 1800),
+            )
+        except Exception as e:
+            print(f"[WARNING] Failed to use AzureDirectModel: {e}. Falling back to LiteLLMModel.")
+            model = LiteLLMModel(**model_params)
+    else:
+        model = LiteLLMModel(**model_params)
 
     # Create a CodeAgent instance with the specified model
     # Note: The local Python executor is patched to support:

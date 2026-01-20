@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -18,24 +19,21 @@ from azure_client import get_trapi_client, TRAPI_DEPLOYMENT_MAP, resolve_deploym
 
 def get_trapi_deployment(model_name: str) -> str:
     """Map model name to TRAPI deployment name."""
-    # Strip any prefix
-    name = model_name.lower()
-    if name.startswith('openai/'):
-        name = name[7:]
-    if name.startswith('azure/'):
-        name = name[6:]
+    # Use the azure_client's resolve function
+    return resolve_deployment_name(model_name)
 
-    # Try direct mapping
-    if name in TRAPI_DEPLOYMENT_MAP:
-        return TRAPI_DEPLOYMENT_MAP[name]
 
-    # Try partial match
-    for key, deployment in TRAPI_DEPLOYMENT_MAP.items():
-        if key in name or name in key:
-            return deployment
-
-    # Fallback - return as-is
-    return model_name
+def uses_max_completion_tokens(model_id: str) -> bool:
+    """Check if model uses max_completion_tokens instead of max_tokens.
+    O-series and GPT-5 models use max_completion_tokens."""
+    model_lower = model_id.lower()
+    # O-series models (o1, o3, o4-mini)
+    if model_lower.startswith("o1") or model_lower.startswith("o3") or model_lower.startswith("o4"):
+        return True
+    # GPT-5 series
+    if model_lower.startswith("gpt-5") or "gpt-5" in model_lower:
+        return True
+    return False
 
 
 class APIAgent:
@@ -91,21 +89,41 @@ class APIAgent:
             )
 
         elif self.reasoning_effort is not None:
-            completion = self.client.chat.completions.create(
-                model=self.deployment_name,
-                messages=messages,
-                max_completion_tokens=16384,
-                temperature=self.temperature,
-                reasoning_effort=self.reasoning_effort,
-            )
+            # Build request parameters
+            request_params = {
+                "model": self.deployment_name,
+                "messages": messages,
+                "max_completion_tokens": 16384,
+                "temperature": self.temperature,
+                "reasoning_effort": self.reasoning_effort,
+            }
+            # Add extra headers for DeepSeek models
+            if 'deepseek' in self.model_id.lower():
+                request_params["extra_headers"] = {"extra-parameters": "pass-through"}
+            completion = self.client.chat.completions.create(**request_params)
         else:
-            completion = self.client.chat.completions.create(
-                model=self.deployment_name,
-                messages=messages,
-                max_tokens=16384,
-                temperature=self.temperature,
-        )
-        return completion.choices[0].message.content
+            # Build request parameters
+            request_params = {
+                "model": self.deployment_name,
+                "messages": messages,
+                "temperature": self.temperature,
+            }
+            # Use max_completion_tokens for GPT-5/O-series, max_tokens for others
+            if uses_max_completion_tokens(self.model_id):
+                request_params["max_completion_tokens"] = 16384
+            else:
+                request_params["max_tokens"] = 16384
+            # Add extra headers for DeepSeek models
+            if 'deepseek' in self.model_id.lower():
+                request_params["extra_headers"] = {"extra-parameters": "pass-through"}
+            completion = self.client.chat.completions.create(**request_params)
+
+        # Strip thinking tags for DeepSeek models
+        content = completion.choices[0].message.content
+        if 'deepseek' in self.model_id.lower() and content:
+            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
+
+        return content
 
 def _run_task_impl(input: dict[str, dict], **kwargs) -> dict[str, str]:
     """Internal function that runs the actual task logic (no tracing)."""
@@ -139,12 +157,8 @@ def _run_task_impl(input: dict[str, dict], **kwargs) -> dict[str, str]:
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
         )
         use_trapi = False
-    elif "deepseek" in kwargs['model_name']:
-        from together import Together
-        agent_client = Together()
-        use_trapi = False
     else:
-        # Default to TRAPI
+        # Default to TRAPI for all other models (including DeepSeek)
         if use_trapi:
             agent_client = get_trapi_client()
         else:

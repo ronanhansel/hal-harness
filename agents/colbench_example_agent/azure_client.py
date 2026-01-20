@@ -61,7 +61,10 @@ TRAPI_DEPLOYMENT_MAP = {
     'qwen3-8b': 'gcr-qwen3-8b',
     'phi4': 'gcr-phi-4-shared',
     'mistral': 'gcr-mistralai-8x7b-shared',
-    'deepseek-r1': 'deepseek-r1_1',
+    'deepseek-r1': 'DeepSeek-R1_1',
+    'deepseek-r1_1': 'DeepSeek-R1_1',
+    'deepseek-v3': 'deepseek-ai/DeepSeek-V3-0324',
+    'deepseek-ai/deepseek-v3-0324': 'deepseek-ai/DeepSeek-V3-0324',
 
     # Embeddings
     'text-embedding-3-large': 'text-embedding-3-large_1',
@@ -205,17 +208,29 @@ def resolve_deployment_name(model: str) -> str:
     Resolve a friendly model name to its TRAPI deployment name.
 
     Args:
-        model: Model name (e.g., 'gpt-4o', 'o3-mini')
+        model: Model name (e.g., 'gpt-4o', 'o3-mini', 'deepseek-ai/DeepSeek-V3-0324')
 
     Returns:
-        Deployment name (e.g., 'gpt-4o_2024-11-20', 'o3-mini_2025-01-31')
+        Deployment name (e.g., 'gpt-4o_2024-11-20', 'o3-mini_2025-01-31', 'deepseek-v3_1')
     """
-    # Remove 'azure/' prefix if present
+    # Remove common prefixes
     if model.startswith('azure/'):
         model = model[6:]
+    if model.startswith('openai/'):
+        model = model[7:]
 
-    # Check mapping
-    return TRAPI_DEPLOYMENT_MAP.get(model.lower(), model)
+    # Check mapping (case-insensitive)
+    model_lower = model.lower()
+    if model_lower in TRAPI_DEPLOYMENT_MAP:
+        return TRAPI_DEPLOYMENT_MAP[model_lower]
+
+    # Try partial match for models like "DeepSeek-R1_1" -> "deepseek-r1"
+    for key, deployment in TRAPI_DEPLOYMENT_MAP.items():
+        if key in model_lower or key.replace('-', '').replace('_', '') in model_lower.replace('-', '').replace('_', ''):
+            return deployment
+
+    # Fallback - return as-is
+    return model
 
 
 # Test function

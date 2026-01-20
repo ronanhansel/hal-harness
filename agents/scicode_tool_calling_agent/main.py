@@ -171,10 +171,24 @@ def run(input: dict[str, Any], **kwargs) -> dict[str, str]:
                     # Provide a minimal fallback response
                     response = f"# Error occurred: {str(e)}\n# Please implement the required function manually"
 
-                # Create a separate LiteLLMModel instance for the cleaning step
-                from smolagents import LiteLLMModel
-                cleaning_model_params = model_params.copy()
-                cleaning_model = LiteLLMModel(**cleaning_model_params)
+                # Create a model instance for the cleaning step (use same model type as main agent)
+                if os.environ.get('USE_DIRECT_AZURE', '').lower() == 'true':
+                    try:
+                        from azure_direct_model import AzureDirectModel
+                        cleaning_model = AzureDirectModel(
+                            model_id=model_params.get('model_id', 'gpt-4o'),
+                            temperature=model_params.get('temperature', 0.7),
+                            max_tokens=1024,  # Shorter for cleaning task
+                        )
+                    except Exception as e:
+                        print(f"[WARNING] Failed to use AzureDirectModel for cleaning: {e}. Falling back to LiteLLMModel.")
+                        from smolagents import LiteLLMModel
+                        cleaning_model_params = model_params.copy()
+                        cleaning_model = LiteLLMModel(**cleaning_model_params)
+                else:
+                    from smolagents import LiteLLMModel
+                    cleaning_model_params = model_params.copy()
+                    cleaning_model = LiteLLMModel(**cleaning_model_params)
                 
                 # Normalize the agent output to a string
                 raw = response if isinstance(response, str) else getattr(response, "content", "")
