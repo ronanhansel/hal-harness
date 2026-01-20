@@ -12,9 +12,9 @@ from pathlib import Path
 # get the ABSOLUTE path of the directory where this file is located
 # Using absolute paths ensures file copying works regardless of current working directory
 this_file_dir = os.path.dirname(os.path.abspath(__file__))
-benchmark_path = os.path.join(this_file_dir, 'scienceagentbench', 'ScienceAgentBench', 'benchmark')
+benchmark_path = os.path.join(this_file_dir, 'scienceagentbench', 'ScienceAgentBench_modified', 'benchmark')
 
-submodule_path = os.path.join(this_file_dir, "scienceagentbench", "ScienceAgentBench")
+submodule_path = os.path.join(this_file_dir, "scienceagentbench", "ScienceAgentBench_modified")
 sys.path.insert(0, submodule_path)
 
 # import this_file_dir.scienceagentbench.ScienceAgentBench.recover_pred_from_log
