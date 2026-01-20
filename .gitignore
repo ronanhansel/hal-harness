@@ -33,3 +33,4 @@ agents/USACO/data/.DS_Store
 .claude/settings.local.json
 debug/
 .DS_Store
+.env.azure
