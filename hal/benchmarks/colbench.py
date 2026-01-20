@@ -1,21 +1,33 @@
 import os
+import sys
 import json
 from typing import Dict, Any, TypedDict, List
 from typing_extensions import NotRequired
 from .base_benchmark import BaseBenchmark
 import docker
 from hal.utils.logging_utils import print_warning
+
+# Add benchmarks directory to path for bundled sweet_rl
+_benchmarks_dir = os.path.dirname(os.path.abspath(__file__))
+if _benchmarks_dir not in sys.path:
+    sys.path.insert(0, _benchmarks_dir)
+
 from sweet_rl.utils import code_evaluate
 
-
-from PIL import Image
-from sweet_rl.utils.webpage_utils import (extract_html_snippet, get_driver,
-                                          render_full_html, replace_urls)
-from torchvision.transforms import functional as F
-from tqdm import tqdm
-from transformers import CLIPModel, CLIPProcessor
-import concurrent
-import torch
+# Frontend evaluation imports (only needed for frontend tasks)
+try:
+    from PIL import Image
+    from sweet_rl.utils.webpage_utils import (extract_html_snippet, get_driver,
+                                              render_full_html, replace_urls)
+    from torchvision.transforms import functional as F
+    from tqdm import tqdm
+    from transformers import CLIPModel, CLIPProcessor
+    import concurrent
+    import torch
+    FRONTEND_EVAL_AVAILABLE = True
+except ImportError as e:
+    FRONTEND_EVAL_AVAILABLE = False
+    print(f"[colbench] Frontend evaluation dependencies not available: {e}")
 
 CODE_USER_PROMPT = """
 Your task is to simulate a human user that interacts with an LLM agent in a dialogue.
@@ -70,7 +82,18 @@ class ColBenchBenchmark(BaseBenchmark):
         
         super().__init__(agent_dir, config, requires_sandbox=self.requires_sandbox, setup_script=self.setup_script)
     
-        task_path = BACKEND_TASK_PATH if benchmark_name == 'colbench_backend_programming' else FRONTEND_TASK_PATH
+        # Determine default task path based on benchmark type
+        default_task_path = BACKEND_TASK_PATH if benchmark_name == 'colbench_backend_programming' else FRONTEND_TASK_PATH
+
+        # Check for dataset path override from environment (used by fix runner scripts)
+        if benchmark_name == 'colbench_backend_programming':
+            task_path = os.environ.get('COLBENCH_BACKEND_DATASET_PATH', default_task_path)
+        else:
+            task_path = os.environ.get('COLBENCH_FRONTEND_DATASET_PATH', default_task_path)
+
+        if task_path != default_task_path:
+            print(f"[colbench] Using custom dataset: {task_path}")
+
         if num_tasks == 0:
             if benchmark_name == 'colbench_backend_programming':
                 num_tasks = 1000
@@ -103,6 +126,13 @@ class ColBenchBenchmark(BaseBenchmark):
         annotation_results = list(agent_output.values())
         if self.benchmark_name == 'colbench_backend_programming':
             return code_evaluate(annotation_results)
+
+        # Frontend evaluation requires additional dependencies
+        if not FRONTEND_EVAL_AVAILABLE:
+            raise RuntimeError(
+                "Frontend evaluation requires: PIL, torch, transformers, selenium. "
+                "Install with: pip install pillow torch transformers selenium webdriver-manager"
+            )
         evaluation_batch_size = min(20, len(annotation_results))
         answer_images = [a["answer"] for a in annotation_results]
         ground_truth_images = [a["task"]["ground_truth"] for a in annotation_results]

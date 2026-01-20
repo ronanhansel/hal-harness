@@ -84,6 +84,14 @@ coreagent = [
 corebench = [
     "scipy>=1.15.2"
 ]
+colbench = [
+    "sweet_rl @ git+https://github.com/facebookresearch/sweet_rl",
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "transformers>=4.30.0",
+    "Pillow>=9.0.0",
+    "selenium>=4.0.0",
+]
 open_deep_research = [
     "anthropic>=0.37.1",
     "audioop-lts<1.0; python_version >= \"3.13\"",

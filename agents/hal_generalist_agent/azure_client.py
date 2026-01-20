@@ -70,16 +70,18 @@ DEPLOYMENT_TO_FRIENDLY = {v: k for k, v in TRAPI_DEPLOYMENT_MAP.items()}
 def get_trapi_client(
     endpoint: str = None,
     api_version: str = None,
-    max_retries: int = 5,
+    max_retries: int = None,
+    timeout: float = None,
 ) -> AzureOpenAI:
     """
     Create an AzureOpenAI client for TRAPI endpoints.
-    Uses Azure CLI credentials (az login).
+    Uses Azure CLI credentials (az login), or pre-fetched token from HAL Docker runner.
 
     Args:
         endpoint: TRAPI endpoint URL (default from env or gcr/shared)
         api_version: API version (default from env or 2024-12-01-preview)
-        max_retries: Number of retries for failed requests
+        max_retries: Number of retries for failed requests (default: 500 for resilience)
+        timeout: Request timeout in seconds (default: 1800 = 30 minutes)
 
     Returns:
         AzureOpenAI client configured for TRAPI
@@ -87,6 +89,23 @@ def get_trapi_client(
     endpoint = endpoint or os.environ.get('TRAPI_ENDPOINT', 'https://trapi.research.microsoft.com/gcr/shared')
     api_version = api_version or os.environ.get('TRAPI_API_VERSION', '2024-12-01-preview')
     scope = os.environ.get('TRAPI_SCOPE', 'api://trapi/.default')
+
+    # Default retry/timeout settings for maximum resilience against rate limits
+    if max_retries is None:
+        max_retries = int(os.environ.get('TRAPI_MAX_RETRIES', 500))
+    if timeout is None:
+        timeout = float(os.environ.get('TRAPI_TIMEOUT', 1800))
+
+    # Check for pre-fetched token from HAL Docker runner
+    prefetched_token = os.environ.get('AZURE_OPENAI_AD_TOKEN')
+    if prefetched_token:
+        return AzureOpenAI(
+            azure_endpoint=endpoint,
+            azure_ad_token=prefetched_token,
+            api_version=api_version,
+            max_retries=max_retries,
+            timeout=timeout,
+        )
 
     # Create credential chain - try Azure CLI first, then Managed Identity
     credential = ChainedTokenCredential(
@@ -100,22 +119,25 @@ def get_trapi_client(
         azure_ad_token_provider=token_provider,
         api_version=api_version,
         max_retries=max_retries,
+        timeout=timeout,
     )
 
 
 def get_azure_client(
     endpoint: str = None,
     api_version: str = None,
-    max_retries: int = 5,
+    max_retries: int = None,
+    timeout: float = None,
 ) -> AzureOpenAI:
     """
     Create an AzureOpenAI client for Azure Cognitive Services endpoints.
-    Uses Azure CLI credentials (az login).
+    Uses Azure CLI credentials (az login), or pre-fetched token from HAL Docker runner.
 
     Args:
         endpoint: Azure endpoint URL (default from env)
         api_version: API version (default from env or 2024-10-21)
-        max_retries: Number of retries for failed requests
+        max_retries: Number of retries for failed requests (default: 500 for resilience)
+        timeout: Request timeout in seconds (default: 1800 = 30 minutes)
 
     Returns:
         AzureOpenAI client configured for Azure Cognitive Services
@@ -123,6 +145,23 @@ def get_azure_client(
     endpoint = endpoint or os.environ.get('AZURE_ENDPOINT', 'https://msrasc-swe.cognitiveservices.azure.com/')
     api_version = api_version or os.environ.get('AZURE_API_VERSION', '2024-10-21')
     scope = os.environ.get('AZURE_SCOPE', 'https://cognitiveservices.azure.com/.default')
+
+    # Default retry/timeout settings for maximum resilience against rate limits
+    if max_retries is None:
+        max_retries = int(os.environ.get('AZURE_MAX_RETRIES', 500))
+    if timeout is None:
+        timeout = float(os.environ.get('AZURE_TIMEOUT', 1800))
+
+    # Check for pre-fetched token from HAL Docker runner
+    prefetched_token = os.environ.get('AZURE_OPENAI_AD_TOKEN')
+    if prefetched_token:
+        return AzureOpenAI(
+            azure_endpoint=endpoint,
+            azure_ad_token=prefetched_token,
+            api_version=api_version,
+            max_retries=max_retries,
+            timeout=timeout,
+        )
 
     credential = AzureCliCredential()
     token_provider = get_bearer_token_provider(credential, scope)
@@ -132,6 +171,7 @@ def get_azure_client(
         azure_ad_token_provider=token_provider,
         api_version=api_version,
         max_retries=max_retries,
+        timeout=timeout,
     )
 
 

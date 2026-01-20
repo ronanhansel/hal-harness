@@ -508,12 +508,15 @@ class DockerRunner:
 
         finally:
             # Cleanup any remaining containers
-            for container_id in self._active_containers:
+            for container_id in self._active_containers.copy():  # Use copy to avoid mutation during iteration
                 try:
                     container = self.docker_client.containers.get(container_id)
-                    # container.stop()
-                    # container.remove()
-                except (docker.errors.NotFound, docker.errors.APIError) as e:
+                    container.stop(timeout=5)
+                    container.remove(force=True)
+                    verbose_logger.debug(f"Cleaned up container {container_id}")
+                except docker.errors.NotFound:
+                    pass  # Container already removed
+                except (docker.errors.APIError, Exception) as e:
                     verbose_logger.debug(f"Warning: Failed to cleanup container {container_id}: {e}")
 
     async def _process_task(self,
@@ -855,11 +858,26 @@ class DockerRunner:
                 # Copy directory to log_dir if specified
                 if self.log_dir:
                     task_log_dir = os.path.join(self.log_dir, task_id)
-                    shutil.copytree(temp_dir, task_log_dir, dirs_exist_ok=True)
-                
+                    # Use ignore_dangling_symlinks and a custom ignore function to handle
+                    # missing files/directories (common in ColBench and other benchmarks)
+                    def ignore_missing(directory, files):
+                        """Ignore files that don't exist (broken symlinks, etc.)"""
+                        ignored = []
+                        for f in files:
+                            path = os.path.join(directory, f)
+                            if not os.path.exists(path):
+                                ignored.append(f)
+                        return ignored
+                    try:
+                        shutil.copytree(temp_dir, task_log_dir, dirs_exist_ok=True,
+                                       ignore=ignore_missing, ignore_dangling_symlinks=True)
+                    except shutil.Error as copy_errors:
+                        # Log but don't fail - some files may not copy but that's OK
+                        verbose_logger.debug(f"Some files not copied for task {task_id}: {copy_errors}")
+
                 # Remove temp directory
-                shutil.rmtree(temp_dir)
-                
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
                 # Remove container
                 try:
                     container = self.docker_client.containers.get(container_id)
@@ -869,7 +887,7 @@ class DockerRunner:
                         self._active_containers.remove(container_id)
                 except Exception:
                     pass  # Container may already be removed
-                
+
             except Exception as e:
                 error_msg = f"Warning: Failed to cleanup for task {task_id}: {e}"
                 verbose_logger.debug(error_msg)

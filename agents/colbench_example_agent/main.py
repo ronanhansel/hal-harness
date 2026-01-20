@@ -1,27 +1,64 @@
+import os
+import sys
+from pathlib import Path
+
+# Add current directory to path for local imports (for bundled sweet_rl and azure_client)
+_this_dir = Path(__file__).resolve().parent
+if str(_this_dir) not in sys.path:
+    sys.path.insert(0, str(_this_dir))
+
 from sweet_rl.environments.human_interaction_env import HumanInteractionEnv
 from sweet_rl.environments.human_design_interaction_env import HumanDesignInteractionEnv
 from openai import OpenAI
-import concurrent.futures
 import anthropic
 
-from google import genai
-# response = client.models.generate_content(
-#     model="gemini-2.0-flash", contents="Explain how AI works in a few words"
-# )
-# print(response.text)
+# Import Azure TRAPI client
+from azure_client import get_trapi_client, TRAPI_DEPLOYMENT_MAP, resolve_deployment_name
+
+
+def get_trapi_deployment(model_name: str) -> str:
+    """Map model name to TRAPI deployment name."""
+    # Strip any prefix
+    name = model_name.lower()
+    if name.startswith('openai/'):
+        name = name[7:]
+    if name.startswith('azure/'):
+        name = name[6:]
+
+    # Try direct mapping
+    if name in TRAPI_DEPLOYMENT_MAP:
+        return TRAPI_DEPLOYMENT_MAP[name]
+
+    # Try partial match
+    for key, deployment in TRAPI_DEPLOYMENT_MAP.items():
+        if key in name or name in key:
+            return deployment
+
+    # Fallback - return as-is
+    return model_name
+
+
 class APIAgent:
     def __init__(self,
                  client,
                  model_id,
                  agent_prompt,
                  temperature=1.0,
-                 reasoning_effort=None):
+                 reasoning_effort=None,
+                 use_trapi=False):
         super().__init__()
         self.model_id = model_id
         self.temperature = temperature
         self.client = client
         self.agent_prompt = agent_prompt
         self.reasoning_effort = reasoning_effort
+        self.use_trapi = use_trapi
+
+        # Map to TRAPI deployment name if using TRAPI
+        if use_trapi:
+            self.deployment_name = get_trapi_deployment(model_id)
+        else:
+            self.deployment_name = model_id
 
     def get_action(self, messages):
         if messages is None:
@@ -52,10 +89,10 @@ class APIAgent:
                 max_tokens=16384,
                 temperature=self.temperature,
             )
-        
+
         elif self.reasoning_effort is not None:
             completion = self.client.chat.completions.create(
-                model=self.model_id,
+                model=self.deployment_name,
                 messages=messages,
                 max_completion_tokens=16384,
                 temperature=self.temperature,
@@ -63,53 +100,82 @@ class APIAgent:
             )
         else:
             completion = self.client.chat.completions.create(
-                model=self.model_id,
+                model=self.deployment_name,
                 messages=messages,
                 max_tokens=16384,
                 temperature=self.temperature,
         )
         return completion.choices[0].message.content
-    
-def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
 
+def _run_task_impl(input: dict[str, dict], **kwargs) -> dict[str, str]:
+    """Internal function that runs the actual task logic (no tracing)."""
     assert 'model_name' in kwargs, 'model_name is required'
-    env_model_name = "gpt-4o-2024-08-06"
+
+    # Use TRAPI by default for Azure deployment
+    use_trapi = os.environ.get('USE_TRAPI', 'true').lower() == 'true'
+
     task_id = list(input.keys())[0]
     task_data = input[task_id]
-    env_client = OpenAI()
-    if "gpt"  in kwargs['model_name'] or "o3" in kwargs['model_name'] or "o4-mini" in kwargs['model_name']:
-        agent_client = OpenAI()
+
+    # Environment client - always use TRAPI for stability
+    if use_trapi:
+        env_client = get_trapi_client()
+        env_model_name = get_trapi_deployment("gpt-4o")
+    else:
+        env_client = OpenAI()
+        env_model_name = "gpt-4o-2024-08-06"
+
+    # Agent client - use TRAPI for GPT/O-series models
+    if "gpt" in kwargs['model_name'].lower() or "o3" in kwargs['model_name'].lower() or "o4-mini" in kwargs['model_name'].lower():
+        if use_trapi:
+            agent_client = get_trapi_client()
+        else:
+            agent_client = OpenAI()
     elif kwargs['model_name'] == "claude-3-7-sonnet-20250219":
         agent_client = anthropic.Anthropic()
+        use_trapi = False  # Anthropic doesn't use TRAPI
     elif "gemini" in kwargs['model_name']:
         agent_client = OpenAI(
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
         )
+        use_trapi = False
     elif "deepseek" in kwargs['model_name']:
         from together import Together
         agent_client = Together()
+        use_trapi = False
+    else:
+        # Default to TRAPI
+        if use_trapi:
+            agent_client = get_trapi_client()
+        else:
+            agent_client = OpenAI()
 
-    # print("="*100)
-    # print("input", input)
-    # print("="*100)
+    # Load prompt file relative to this script's location
     if task_data["task_type"] == "code":
-        with open("./code_agent_prompt.txt", "r") as f:
-            agent_prompt = f.read()
+        prompt_file = _this_dir / "code_agent_prompt.txt"
     else:
-        with open("./html_agent_prompt.txt", "r") as f:
-            agent_prompt = f.read()
-    agent = APIAgent(agent_client, kwargs['model_name'], agent_prompt, reasoning_effort=kwargs['reasoning_effort'] if 'reasoning_effort' in kwargs else None)
+        prompt_file = _this_dir / "html_agent_prompt.txt"
+
+    with open(prompt_file, "r") as f:
+        agent_prompt = f.read()
+    agent = APIAgent(
+        agent_client,
+        kwargs['model_name'],
+        agent_prompt,
+        reasoning_effort=kwargs.get('reasoning_effort'),
+        use_trapi=use_trapi
+    )
     if task_data["task_type"] == "code":
-        env = HumanInteractionEnv(env_client, task_data["human_prompt"], env_model_name)    
+        env = HumanInteractionEnv(env_client, task_data["human_prompt"], env_model_name)
     else:
-        env = HumanDesignInteractionEnv(env_client, task_data["human_prompt"], 
+        env = HumanDesignInteractionEnv(env_client, task_data["human_prompt"],
                                         env_model_name,
                                         temp_path=task_data['cache_path'],
-                                        gpt_client=True)    
-    
-    
-    
-    ### ENV SETUP (usually this should be untouched) ###    
+                                        gpt_client=True)
+
+
+
+    ### ENV SETUP (usually this should be untouched) ###
     observation = env.reset(task_data["problem_description"], task_data["hidden_information"])
     for i in range(10):
         response = agent.get_action(observation)
@@ -119,9 +185,23 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
 
     if task_data["task_type"] == "html":
         env.driver.quit()
-    
+
     ### WHEN DONE WE RETURN THE ENV STATE ###
     return {task_id: {"answer": answer, "dialogue_history": dialogue_history, "task":{
-                      "test_cases": task_data["test_cases"] if task_data["task_type"] == "code" else None, 
+                      "test_cases": task_data["test_cases"] if task_data["task_type"] == "code" else None,
                       "ground_truth": task_data["hidden_information"]}}}
 
+
+def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
+    """
+    Main entry point for HAL harness.
+    Calls the implementation directly - tracing is handled by HAL harness.
+
+    Note: We removed the dynamic @weave.op() wrapper because Weave cannot
+    introspect dynamically-created nested functions, causing:
+    "Error getting code deps: 'NoneType' object has no attribute '__dict__'"
+
+    HAL harness already wraps agent calls in Weave ops, so individual LLM calls
+    will still be traced as children of the main agent call.
+    """
+    return _run_task_impl(input, **kwargs)

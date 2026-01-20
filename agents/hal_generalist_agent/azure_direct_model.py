@@ -218,12 +218,19 @@ def resolve_deployment_name(model: str) -> str:
 def create_trapi_client(
     endpoint: str = None,
     api_version: str = None,
-    max_retries: int = 5,
+    max_retries: int = None,
+    timeout: float = None,
 ) -> AzureOpenAI:
     """Create AzureOpenAI client for TRAPI with auto token refresh."""
     endpoint = endpoint or os.environ.get('TRAPI_ENDPOINT', 'https://trapi.research.microsoft.com/gcr/shared')
     api_version = api_version or os.environ.get('TRAPI_API_VERSION', '2024-12-01-preview')
     scope = os.environ.get('TRAPI_SCOPE', 'api://trapi/.default')
+
+    # Default retry/timeout settings for maximum resilience against rate limits
+    if max_retries is None:
+        max_retries = int(os.environ.get('TRAPI_MAX_RETRIES', 500))
+    if timeout is None:
+        timeout = float(os.environ.get('TRAPI_TIMEOUT', 1800))
 
     # Method 1: Try MSAL token provider (works in containers without az CLI)
     # This dynamically refreshes tokens using the mounted ~/.azure cache
@@ -241,6 +248,7 @@ def create_trapi_client(
                         azure_ad_token_provider=token_provider,
                         api_version=api_version,
                         max_retries=max_retries,
+                        timeout=timeout,
                     )
             except Exception as e:
                 print(f"[AzureDirectModel] MSAL token provider failed: {e}")
@@ -254,6 +262,7 @@ def create_trapi_client(
             azure_ad_token=prefetched_token,
             api_version=api_version,
             max_retries=max_retries,
+            timeout=timeout,
         )
 
     # Method 3: Use azure-identity credential chain (requires az CLI or managed identity)
@@ -269,6 +278,7 @@ def create_trapi_client(
             azure_ad_token_provider=token_provider,
             api_version=api_version,
             max_retries=max_retries,
+            timeout=timeout,
         )
 
     raise RuntimeError("No authentication method available. Ensure ~/.azure is mounted or AZURE_OPENAI_AD_TOKEN is set.")
@@ -285,8 +295,8 @@ class AzureDirectModel(Model):
         model_id: str = "gpt-4o",
         temperature: float = 0.7,
         max_tokens: int = 4096,
-        timeout: int = 600,
-        num_retries: int = 5,
+        timeout: int = 1800,  # 30 minutes for resilience
+        num_retries: int = 500,  # High retry count for rate limit resilience
         endpoint: str = None,
         api_version: str = None,
         **kwargs,
@@ -320,6 +330,7 @@ class AzureDirectModel(Model):
             endpoint=endpoint,
             api_version=api_version,
             max_retries=num_retries,
+            timeout=timeout,
         )
 
         print(f"[AzureDirectModel] Initialized: {self.model_id} -> {self.deployment_name}")
