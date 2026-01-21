@@ -164,8 +164,11 @@ def run(input: dict[str, Any], **kwargs) -> dict[str, str]:
 
                 try:
                     response = agent.run(prompt)
+                    print(f"[DEBUG] Step {i+1} agent.run() returned: type={type(response)}, len={len(str(response)) if response else 0}")
                     response = str(response)
                     response = response.replace("```python", "").replace("```", "").strip()
+                    if not response:
+                        print(f"[WARNING] Step {i+1} agent returned empty response after cleaning")
                 except Exception as e:
                     print(f"Error running agent for step {i+1}: {e}")
                     # Print full traceback for debugging
