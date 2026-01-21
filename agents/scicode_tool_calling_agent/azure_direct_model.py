@@ -11,9 +11,30 @@ Usage:
 
 import os
 import re
+import sys
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable
 
 from openai import AzureOpenAI
+
+# Add parent directory to path for model_quirks import
+_agents_dir = Path(__file__).resolve().parent.parent
+if str(_agents_dir) not in sys.path:
+    sys.path.insert(0, str(_agents_dir))
+
+# Import shared model quirks module
+try:
+    from model_quirks import (
+        ModelQuirks,
+        supports_stop_parameter,
+        supports_temperature,
+        uses_max_completion_tokens,
+        requires_extra_headers,
+        strip_thinking_tags,
+    )
+    MODEL_QUIRKS_AVAILABLE = True
+except ImportError:
+    MODEL_QUIRKS_AVAILABLE = False
 
 # Import smolagents Tool for type annotations
 try:
@@ -504,11 +525,11 @@ class AzureDirectModel(Model):
 
     def _supports_stop(self) -> bool:
         """Check if model supports stop parameter."""
+        if MODEL_QUIRKS_AVAILABLE:
+            return supports_stop_parameter(self.model_id)
+        # Fallback if model_quirks not available
         model_lower = self.model_id.lower()
-        # O-series reasoning models (except o3-mini) don't support stop
-        if model_lower.startswith("o3") and "o3-mini" not in model_lower:
-            return False
-        if "o4-mini" in model_lower:
+        if model_lower.startswith("o1") or model_lower.startswith("o3") or model_lower.startswith("o4"):
             return False
         if model_lower.startswith("gpt-5"):
             return False
@@ -516,22 +537,24 @@ class AzureDirectModel(Model):
 
     def _supports_temperature(self) -> bool:
         """Check if model supports temperature parameter."""
+        if MODEL_QUIRKS_AVAILABLE:
+            return supports_temperature(self.model_id)
+        # Fallback if model_quirks not available
         model_lower = self.model_id.lower()
-        # O-series models don't support temperature
         if model_lower.startswith("o1") or model_lower.startswith("o3") or model_lower.startswith("o4"):
             return False
-        # GPT-5 models only support temperature=1 (default), so don't pass it
         if model_lower.startswith("gpt-5"):
             return False
         return True
 
     def _uses_max_completion_tokens(self) -> bool:
         """Check if model uses max_completion_tokens instead of max_tokens."""
+        if MODEL_QUIRKS_AVAILABLE:
+            return uses_max_completion_tokens(self.model_id)
+        # Fallback if model_quirks not available
         model_lower = self.model_id.lower()
-        # O-series reasoning models and GPT-5 use max_completion_tokens
         if model_lower.startswith("o1") or model_lower.startswith("o3") or model_lower.startswith("o4"):
             return True
-        # GPT-5 also uses max_completion_tokens
         if model_lower.startswith("gpt-5"):
             return True
         return False

@@ -1,11 +1,25 @@
 import os
 import ast
+import sys
+from pathlib import Path
 from smolagents import LiteLLMModel, CodeAgent, Tool, DuckDuckGoSearchTool, PythonInterpreterTool, FinalAnswerTool
 import time
 
 import smolagents.models
 import smolagents.local_python_executor as executor_module
 import re
+
+# Add parent directory to path for model_quirks import
+_agents_dir = Path(__file__).resolve().parent.parent
+if str(_agents_dir) not in sys.path:
+    sys.path.insert(0, str(_agents_dir))
+
+# Import shared model quirks module
+try:
+    from model_quirks import supports_stop_parameter, patch_smolagents
+    MODEL_QUIRKS_AVAILABLE = True
+except ImportError:
+    MODEL_QUIRKS_AVAILABLE = False
 
 # ============================================================================
 # SCIPY COMPATIBILITY SHIM
@@ -52,22 +66,27 @@ def _patched_evaluate_binop(binop, state, static_tools, custom_tools, authorized
 # Replace the function in smolagents local_python_executor
 executor_module.evaluate_binop = _patched_evaluate_binop
 
-def supports_stop_parameter(model_id: str) -> bool:
-    """
-    Check if the model supports the `stop` parameter.
+# Use shared model_quirks if available, otherwise fallback to local implementation
+if MODEL_QUIRKS_AVAILABLE:
+    # Patch smolagents with the shared implementation
+    patch_smolagents()
+else:
+    # Fallback local implementation
+    def supports_stop_parameter(model_id: str) -> bool:
+        """
+        Check if the model supports the `stop` parameter.
 
-    Not supported with reasoning models openai/o3, openai/o4-mini, and gpt-5 (and their versioned variants).
-    """
-    model_name = model_id.split("/")[-1]
-    # Normalize: replace underscores with dashes for consistent matching
-    model_name = model_name.replace("_", "-")
-    # o3, o4-mini, and gpt-5 (including versioned variants) don't support stop parameter
-    # Pattern matches: o3, o3-2025-04-16, o4-mini, o4-mini-2025-04-16, gpt-5, etc.
-    pattern = r"^(o[34](-mini)?|gpt-5)([-\d].*)?$"
-    return not re.match(pattern, model_name, re.IGNORECASE)
+        Not supported with reasoning models openai/o1, o3, o4-mini, and gpt-5 (and their versioned variants).
+        """
+        model_name = model_id.split("/")[-1]
+        # Normalize: replace underscores with dashes for consistent matching
+        model_name = model_name.replace("_", "-")
+        # o-series and gpt-5 (including versioned variants) don't support stop parameter
+        pattern = r"^(o[134](-mini)?|gpt-5)([-\d].*)?$"
+        return not re.match(pattern, model_name, re.IGNORECASE)
 
-# Replace the function in smolagents
-smolagents.models.supports_stop_parameter = supports_stop_parameter
+    # Replace the function in smolagents
+    smolagents.models.supports_stop_parameter = supports_stop_parameter
 
 AUTHORIZED_IMPORTS = [
     # === Core Python modules ===

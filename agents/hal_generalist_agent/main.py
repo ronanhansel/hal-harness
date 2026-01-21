@@ -17,6 +17,19 @@ _this_dir = Path(__file__).resolve().parent
 if str(_this_dir) not in sys.path:
     sys.path.insert(0, str(_this_dir))
 
+# Add parent directory to path for model_quirks import
+_agents_dir = _this_dir.parent
+if str(_agents_dir) not in sys.path:
+    sys.path.insert(0, str(_agents_dir))
+
+# Import shared model quirks module
+try:
+    from model_quirks import supports_stop_parameter as _shared_supports_stop, patch_smolagents
+    MODEL_QUIRKS_AVAILABLE = True
+except ImportError:
+    MODEL_QUIRKS_AVAILABLE = False
+    _shared_supports_stop = None
+
 from typing import Optional
 
 try:
@@ -55,27 +68,31 @@ from smolagents import CodeAgent, tool, LiteLLMModel, Tool, PythonInterpreterToo
 from smolagents.models import MessageRole, Model
 from smolagents.agents import ActionStep
 
-# Monkey-patch smolagents to handle GPT-5
+# Monkey-patch smolagents to handle GPT-5 and O-series models
 import smolagents.models
-import re
 
-def supports_stop_parameter(model_id: str) -> bool:
-    """
-    Check if the model supports the `stop` parameter.
-    
-    Not supported with reasoning models openai/o3, openai/o4-mini, and gpt-5 (and their versioned variants).
-    """
-    model_name = model_id.split("/")[-1].lower()
-    if model_name.startswith("gpt-5"):
-        return False
-    if "o4-mini" in model_name:
-        return False
-    if model_name.startswith("o3") and "o3-mini" not in model_name:
-        return False
-    return True
+# Use shared model_quirks if available, otherwise fallback to local implementation
+if MODEL_QUIRKS_AVAILABLE:
+    # Patch smolagents with the shared implementation
+    patch_smolagents()
+    supports_stop_parameter = _shared_supports_stop
+else:
+    # Fallback local implementation
+    def supports_stop_parameter(model_id: str) -> bool:
+        """
+        Check if the model supports the `stop` parameter.
 
-# Replace the function in smolagents
-smolagents.models.supports_stop_parameter = supports_stop_parameter
+        Not supported with reasoning models openai/o1, o3, o4-mini, and gpt-5 (and their versioned variants).
+        """
+        model_name = model_id.split("/")[-1].lower()
+        if model_name.startswith("gpt-5"):
+            return False
+        if model_name.startswith("o1") or model_name.startswith("o3") or model_name.startswith("o4"):
+            return False
+        return True
+
+    # Replace the function in smolagents
+    smolagents.models.supports_stop_parameter = supports_stop_parameter
 
 try:
     from mdconvert import MarkdownConverter  # type: ignore
