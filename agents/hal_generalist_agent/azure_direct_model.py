@@ -369,18 +369,47 @@ class AzureDirectModel(Model):
         # Note: We can't use OpenAI's native 'tool' role because it requires
         # a preceding assistant message with 'tool_calls' structure, which
         # smolagents doesn't provide. Instead, convert to user messages.
+        #
+        # smolagents 1.24.0 passes ChatMessage objects, not dicts!
+        # We need to convert them to dicts using .dict() method.
         processed_messages = []
         for msg in messages:
-            msg_copy = dict(msg)
-            role = msg_copy.get('role', '')
+            # Handle both ChatMessage objects (smolagents 1.24+) and plain dicts
+            if hasattr(msg, 'dict') and callable(msg.dict):
+                # smolagents ChatMessage dataclass has .dict() method
+                msg_dict = msg.dict()
+            elif hasattr(msg, '__dict__'):
+                # Fallback for other dataclass-like objects
+                msg_dict = dict(msg.__dict__)
+            elif isinstance(msg, dict):
+                msg_dict = dict(msg)
+            else:
+                # Last resort: try to convert
+                msg_dict = {'role': str(getattr(msg, 'role', 'user')), 'content': str(getattr(msg, 'content', ''))}
+
+            # Get role - might be MessageRole enum or string
+            role = msg_dict.get('role', '')
+            if hasattr(role, 'value'):
+                # MessageRole enum - get the string value
+                role = role.value
+            role = str(role)
+
             if role == 'tool-call':
                 # Convert tool-call to assistant (the model's tool invocation)
-                msg_copy['role'] = 'assistant'
+                msg_dict['role'] = 'assistant'
             elif role == 'tool-response':
                 # Convert tool-response to user (treat as user-provided information)
                 # We can't use 'tool' role without proper tool_calls structure
-                msg_copy['role'] = 'user'
-            processed_messages.append(msg_copy)
+                msg_dict['role'] = 'user'
+            else:
+                msg_dict['role'] = role
+
+            # Ensure content is a string or proper format for Azure API
+            content = msg_dict.get('content')
+            if content is not None and not isinstance(content, (str, list)):
+                msg_dict['content'] = str(content)
+
+            processed_messages.append(msg_dict)
 
         # Build request parameters
         request_params = {
@@ -428,8 +457,8 @@ class AzureDirectModel(Model):
             request_params["extra_headers"] = {"extra-parameters": "pass-through"}
 
         try:
-            # Call Azure OpenAI with optional Weave tracing
-            response = self._traced_completion_create(request_params)
+            # Call Azure OpenAI - Weave should autopatch this if enabled
+            response = self.client.chat.completions.create(**request_params)
             content = response.choices[0].message.content or ""
 
             # Strip thinking tags for deepseek
@@ -449,36 +478,29 @@ class AzureDirectModel(Model):
             print(f"[AzureDirectModel] Error calling {self.deployment_name}: {type(e).__name__}: {e}")
             raise
 
-    def _traced_completion_create(self, request_params: Dict[str, Any]):
-        """
-        Call Azure OpenAI API with optional Weave tracing.
-        Falls back to direct call if Weave is not available.
-        """
-        try:
-            import weave
-            # Create a traced wrapper for the API call
-            @weave.op(name=f"AzureOpenAI.chat.completions.create")
-            def _create_with_weave(params):
-                return self.client.chat.completions.create(**params)
-
-            return _create_with_weave(request_params)
-        except (ImportError, Exception):
-            # Fall back to direct call without tracing
-            return self.client.chat.completions.create(**request_params)
-
     def generate(
         self,
         messages: List[Dict[str, str]],
         stop_sequences: Optional[List[str]] = None,
-        grammar: Optional[str] = None,
+        response_format: Optional[Dict[str, str]] = None,
         tools_to_call_from: Optional[List[Any]] = None,
         **kwargs,
     ) -> ChatMessage:
         """
-        Generate method - alias for __call__ for compatibility with smolagents.
-        Some versions of smolagents call generate() instead of __call__().
+        Generate method - required by smolagents 1.24.0+.
+        In smolagents 1.24.0, __call__ delegates to generate().
+
+        Args:
+            messages: List of message dicts or ChatMessage objects
+            stop_sequences: Optional stop sequences
+            response_format: Optional response format (replaces 'grammar' in 1.24.0)
+            tools_to_call_from: Optional list of Tool objects for function calling
         """
-        return self.__call__(messages, stop_sequences, grammar, tools_to_call_from, **kwargs)
+        # response_format is the new name for grammar in smolagents 1.24.0
+        # Pass it through kwargs if provided
+        if response_format is not None:
+            kwargs['response_format'] = response_format
+        return self.__call__(messages, stop_sequences, None, tools_to_call_from, **kwargs)
 
     def _supports_stop(self) -> bool:
         """Check if model supports stop parameter."""
