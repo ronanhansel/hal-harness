@@ -58,6 +58,7 @@ from .azure_utils import (
 from .model_utils import (
     uses_max_completion_tokens,
     supports_temperature,
+    supports_top_p,
     supports_reasoning_effort,
     is_deepseek_model,
     strip_thinking_tags,
@@ -167,18 +168,25 @@ def make_chat_completion(
     messages: List[Dict[str, str]],
     reasoning_effort: Optional[str] = None,
     temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
     max_tokens: int = 16384,
     **kwargs,
 ) -> str:
     """
     Make a chat completion request with proper parameter handling.
 
+    Automatically filters unsupported parameters based on model type:
+    - O-series and GPT-5: No temperature, top_p; use max_completion_tokens
+    - DeepSeek-R1: No temperature; add extra_headers
+    - Standard models: All params supported
+
     Args:
         client: OpenAI or AzureOpenAI client
         model_name: Model name
         messages: List of message dicts
         reasoning_effort: Reasoning effort level
-        temperature: Temperature setting
+        temperature: Temperature setting (filtered for reasoning models)
+        top_p: Top-p setting (filtered for reasoning models)
         max_tokens: Max tokens for completion
         **kwargs: Additional parameters
 
@@ -207,6 +215,10 @@ def make_chat_completion(
     if temperature is not None and supports_temperature(model_name):
         params['temperature'] = temperature
 
+    # Add top_p only if supported
+    if top_p is not None and supports_top_p(model_name):
+        params['top_p'] = top_p
+
     # Add reasoning effort if supported
     if reasoning_effort and supports_reasoning_effort(model_name):
         params['reasoning_effort'] = reasoning_effort
@@ -216,8 +228,16 @@ def make_chat_completion(
         params['extra_headers'] = kwargs.pop('extra_headers', {})
         params['extra_headers']['extra-parameters'] = 'pass-through'
 
+    # Filter out unsupported params from kwargs
+    filtered_kwargs = {}
+    for key, value in kwargs.items():
+        # Skip params that were already handled or are known unsupported
+        if key in ('temperature', 'top_p') and not supports_temperature(model_name):
+            continue
+        filtered_kwargs[key] = value
+
     # Add remaining kwargs
-    params.update(kwargs)
+    params.update(filtered_kwargs)
 
     # Make request
     response = client.chat.completions.create(**params)

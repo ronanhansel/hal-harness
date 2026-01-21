@@ -2,14 +2,14 @@
 Direct Azure OpenAI / TRAPI Client for HAL
 Bypasses LiteLLM proxy for better stability
 
-Usage:
-    from azure_client import get_trapi_client, get_azure_client, TRAPI_DEPLOYMENT_MAP
+DEPRECATED: This file is kept for backwards compatibility only.
+Please use the shared module instead:
+    from shared.azure_utils import get_trapi_client, resolve_deployment_name, TRAPI_DEPLOYMENT_MAP
 
-    client = get_trapi_client()
-    response = client.chat.completions.create(
-        model=TRAPI_DEPLOYMENT_MAP.get('gpt-4o', 'gpt-4o_2024-11-20'),
-        messages=[{"role": "user", "content": "Hello"}]
-    )
+The shared module provides:
+- MSAL token provider for Docker containers without az CLI
+- Centralized deployment name mapping
+- Consistent behavior across all agents
 """
 
 import os

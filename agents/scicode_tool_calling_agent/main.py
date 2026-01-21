@@ -19,8 +19,10 @@ def run(input: dict[str, Any], **kwargs) -> dict[str, str]:
 
     assert 'model_name' in kwargs, 'model_name is required'
 
-    # Configure litellm to drop unsupported params
+    # Configure litellm to drop unsupported params (safety net for GPT-5/O-series)
     litellm.drop_params = True
+    litellm.num_retries = int(os.environ.get('LITELLM_NUM_RETRIES', 35))
+    litellm.request_timeout = int(os.environ.get('LITELLM_REQUEST_TIMEOUT', 600))
     
     # Setup model parameters for LiteLLMModel
     model_params = {}

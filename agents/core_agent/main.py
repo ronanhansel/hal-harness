@@ -13,6 +13,11 @@ from smolagents import CodeAgent, tool, LiteLLMModel, DuckDuckGoSearchTool, Tool
 from smolagents.models import MessageRole, Model
 from smolagents.agents import ActionStep
 
+# Add parent directory to path for shared module import
+_agents_dir = Path(__file__).resolve().parent.parent
+if str(_agents_dir) not in sys.path:
+    sys.path.insert(0, str(_agents_dir))
+
 # Monkey-patch smolagents to handle GPT-5
 import smolagents.models
 import re
@@ -612,7 +617,54 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
         # Non-fatal: if litellm is unavailable or wrapping fails, continue without provider pinning
         print(f"[WARNING] Failed to enable OpenRouter provider pinning: {e}")
 
-    model = LiteLLMModel(**model_params)
+    # Determine if we should use Azure/TRAPI direct access
+    # Default to Azure/TRAPI for all OpenAI models (faster, more reliable)
+    def _should_use_azure():
+        # Explicit opt-out
+        if os.environ.get('USE_TRAPI', '').lower() == 'false':
+            return False
+        if os.environ.get('USE_DIRECT_AZURE', '').lower() == 'false':
+            return False
+
+        # Normalize model name
+        model_lower = model_params.get('model_id', '').lower()
+        for prefix in ('openai/', 'azure/'):
+            if model_lower.startswith(prefix):
+                model_lower = model_lower[len(prefix):]
+                break
+
+        # Use TRAPI for all OpenAI models by default
+        is_openai_model = (
+            'gpt-' in model_lower or
+            model_lower.startswith('gpt-') or
+            model_lower.startswith('o1') or
+            model_lower.startswith('o3') or
+            model_lower.startswith('o4') or
+            'deepseek' in model_lower
+        )
+        return is_openai_model
+
+    # Use Azure direct for OpenAI models (faster, no proxy overhead)
+    if _should_use_azure():
+        try:
+            # Try hal_generalist_agent's AzureDirectModel
+            hal_agent_dir = Path(__file__).parent.parent / "hal_generalist_agent"
+            if str(hal_agent_dir) not in sys.path:
+                sys.path.insert(0, str(hal_agent_dir))
+            from azure_direct_model import AzureDirectModel
+            print(f"[INFO] Using AzureDirectModel for direct TRAPI access")
+            model = AzureDirectModel(
+                model_id=model_params.get('model_id', kwargs['model_name']),
+                temperature=model_params.get('temperature', 0.7),
+                num_retries=500,
+                timeout=1800,
+                **{k: v for k, v in kwargs.items() if k in ['reasoning_effort']}
+            )
+        except Exception as e:
+            print(f"[WARNING] Failed to use AzureDirectModel: {e}. Falling back to LiteLLMModel.")
+            model = LiteLLMModel(**model_params)
+    else:
+        model = LiteLLMModel(**model_params)
     
     # Prepend hints to the task prompt if available
     prompt = task['prompt']

@@ -1,6 +1,7 @@
 weave
 openai
 azure-identity
+msal
 anthropic
 # sweet_rl is bundled directly in this agent directory (Facebook Research version has broken setup.py)
 # selenium and webdriver-manager only needed for frontend tasks

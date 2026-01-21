@@ -3,35 +3,154 @@ import re
 import sys
 from pathlib import Path
 
-# Add current directory and agents directory to path for imports
+# CRITICAL: Add current directory to path FIRST, before any other imports
+# This is needed for sweet_rl which is bundled in this agent directory
 _this_dir = Path(__file__).resolve().parent
 _agents_dir = _this_dir.parent
-if str(_this_dir) not in sys.path:
-    sys.path.insert(0, str(_this_dir))
-if str(_agents_dir) not in sys.path:
-    sys.path.insert(0, str(_agents_dir))
 
+# Force add to beginning of sys.path (don't just check if present)
+sys.path.insert(0, str(_this_dir))
+sys.path.insert(0, str(_agents_dir))
+
+# Debug: Print path info
+print(f"[colbench_agent] _this_dir = {_this_dir}")
+print(f"[colbench_agent] sweet_rl dir exists = {(_this_dir / 'sweet_rl').exists()}")
+print(f"[colbench_agent] sys.path[0:5] = {sys.path[0:5]}")
+
+# Import sweet_rl - should work now that path is set
 from sweet_rl.environments.human_interaction_env import HumanInteractionEnv
 from sweet_rl.environments.human_design_interaction_env import HumanDesignInteractionEnv
-from openai import OpenAI
+
+from openai import OpenAI, AzureOpenAI
 import anthropic
 
-# Import from shared module (preferred) or fall back to local azure_client
+# Import from shared module
 try:
     from shared.azure_utils import get_trapi_client, resolve_deployment_name, TRAPI_DEPLOYMENT_MAP
-    from shared.model_utils import uses_max_completion_tokens
+    from shared.model_utils import uses_max_completion_tokens, supports_temperature
+    SHARED_AVAILABLE = True
 except ImportError:
-    # Fallback to local azure_client for backwards compatibility
-    from azure_client import get_trapi_client, TRAPI_DEPLOYMENT_MAP, resolve_deployment_name
+    SHARED_AVAILABLE = False
+    print("[colbench_agent] Warning: shared module not available, using fallback")
+
+    # Minimal fallback definitions
+    TRAPI_DEPLOYMENT_MAP = {
+        'gpt-4o': 'gpt-4o_2024-11-20',
+        'gpt-4.1': 'gpt-4.1_2025-04-14',
+        'gpt-5': 'gpt-5_2025-08-07',
+        'o3': 'o3_2025-04-16',
+        'o3-mini': 'o3-mini_2025-01-31',
+        'o4-mini': 'o4-mini_2025-04-16',
+    }
+
+    def _normalize_model_id(model_id: str) -> str:
+        """Normalize model ID by stripping provider prefixes."""
+        model_lower = model_id.lower()
+        for prefix in ('openai/', 'azure/', 'anthropic/'):
+            if model_lower.startswith(prefix):
+                return model_lower[len(prefix):]
+        return model_lower
+
+    def resolve_deployment_name(model: str) -> str:
+        model_normalized = _normalize_model_id(model)
+        return TRAPI_DEPLOYMENT_MAP.get(model_normalized, model_normalized)
 
     def uses_max_completion_tokens(model_id: str) -> bool:
-        """Check if model uses max_completion_tokens instead of max_tokens."""
-        model_lower = model_id.lower()
-        if model_lower.startswith("o1") or model_lower.startswith("o3") or model_lower.startswith("o4"):
-            return True
-        if model_lower.startswith("gpt-5") or "gpt-5" in model_lower:
-            return True
-        return False
+        model_lower = _normalize_model_id(model_id)
+        return any(model_lower.startswith(p) for p in ('o1', 'o3', 'o4', 'gpt-5'))
+
+    def supports_temperature(model_id: str) -> bool:
+        model_lower = _normalize_model_id(model_id)
+        return not any(model_lower.startswith(p) for p in ('o1', 'o3', 'o4', 'gpt-5'))
+
+    def get_trapi_client():
+        """Fallback TRAPI client creation."""
+        from openai import AzureOpenAI
+
+        # Azure constants
+        AZURE_CLI_CLIENT_ID = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'
+        MICROSOFT_TENANT_ID = '72f988bf-86f1-41af-91ab-2d7cd011db47'
+        DEFAULT_TRAPI_ENDPOINT = 'https://trapi.research.microsoft.com/gcr/shared'
+        DEFAULT_TRAPI_API_VERSION = '2025-03-01-preview'
+        DEFAULT_TRAPI_SCOPE = 'api://trapi/.default'
+
+        endpoint = os.environ.get('TRAPI_ENDPOINT', DEFAULT_TRAPI_ENDPOINT)
+        api_version = os.environ.get('TRAPI_API_VERSION', DEFAULT_TRAPI_API_VERSION)
+        scope = os.environ.get('TRAPI_SCOPE', DEFAULT_TRAPI_SCOPE)
+        max_retries = int(os.environ.get('TRAPI_MAX_RETRIES', 500))
+        timeout = float(os.environ.get('TRAPI_TIMEOUT', 1800))
+
+        # Method 1: Pre-fetched token
+        prefetched_token = os.environ.get('AZURE_OPENAI_AD_TOKEN')
+        if prefetched_token:
+            print(f"[colbench_agent] Using pre-fetched Azure AD token")
+            return AzureOpenAI(
+                azure_endpoint=endpoint,
+                azure_ad_token=prefetched_token,
+                api_version=api_version,
+                max_retries=max_retries,
+                timeout=timeout,
+            )
+
+        # Method 2: MSAL token provider
+        try:
+            import msal
+            cache_path = os.path.expanduser('~/.azure/msal_token_cache.json')
+            if os.path.exists(cache_path):
+                cache = msal.SerializableTokenCache()
+                with open(cache_path, 'r') as f:
+                    cache.deserialize(f.read())
+                app = msal.PublicClientApplication(
+                    AZURE_CLI_CLIENT_ID,
+                    authority=f'https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}',
+                    token_cache=cache,
+                )
+                accounts = app.get_accounts()
+                if accounts:
+                    def token_provider():
+                        result = app.acquire_token_silent([scope], account=accounts[0])
+                        if result and 'access_token' in result:
+                            return result['access_token']
+                        raise RuntimeError("Failed to acquire token from MSAL cache")
+                    # Test it works
+                    token_provider()
+                    print(f"[colbench_agent] Using MSAL token provider")
+                    return AzureOpenAI(
+                        azure_endpoint=endpoint,
+                        azure_ad_token_provider=token_provider,
+                        api_version=api_version,
+                        max_retries=max_retries,
+                        timeout=timeout,
+                    )
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"[colbench_agent] MSAL fallback failed: {e}")
+
+        # Method 3: Azure Identity
+        try:
+            from azure.identity import AzureCliCredential, get_bearer_token_provider
+            credential = AzureCliCredential()
+            token_provider = get_bearer_token_provider(credential, scope)
+            print(f"[colbench_agent] Using AzureCliCredential")
+            return AzureOpenAI(
+                azure_endpoint=endpoint,
+                azure_ad_token_provider=token_provider,
+                api_version=api_version,
+                max_retries=max_retries,
+                timeout=timeout,
+            )
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"[colbench_agent] Azure Identity fallback failed: {e}")
+
+        raise RuntimeError(
+            "No Azure credentials available. Options:\n"
+            "1. Set AZURE_OPENAI_AD_TOKEN environment variable\n"
+            "2. Mount ~/.azure directory with MSAL cache\n"
+            "3. Install azure-identity and run 'az login'"
+        )
 
 
 def get_trapi_deployment(model_name: str) -> str:
@@ -92,14 +211,16 @@ class APIAgent:
             )
 
         elif self.reasoning_effort is not None:
-            # Build request parameters
+            # Build request parameters for reasoning models
             request_params = {
                 "model": self.deployment_name,
                 "messages": messages,
                 "max_completion_tokens": 16384,
-                "temperature": self.temperature,
                 "reasoning_effort": self.reasoning_effort,
             }
+            # Only add temperature if model supports it
+            if supports_temperature(self.model_id):
+                request_params["temperature"] = self.temperature
             # Add extra headers for DeepSeek models
             if 'deepseek' in self.model_id.lower():
                 request_params["extra_headers"] = {"extra-parameters": "pass-through"}
@@ -109,13 +230,15 @@ class APIAgent:
             request_params = {
                 "model": self.deployment_name,
                 "messages": messages,
-                "temperature": self.temperature,
             }
             # Use max_completion_tokens for GPT-5/O-series, max_tokens for others
             if uses_max_completion_tokens(self.model_id):
                 request_params["max_completion_tokens"] = 16384
             else:
                 request_params["max_tokens"] = 16384
+            # Only add temperature if model supports it
+            if supports_temperature(self.model_id):
+                request_params["temperature"] = self.temperature
             # Add extra headers for DeepSeek models
             if 'deepseek' in self.model_id.lower():
                 request_params["extra_headers"] = {"extra-parameters": "pass-through"}

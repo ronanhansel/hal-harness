@@ -112,6 +112,29 @@ def supports_temperature(model_id: str) -> bool:
     return True
 
 
+def supports_top_p(model_id: str) -> bool:
+    """
+    Check if model supports top_p parameter.
+    O-series and GPT-5 models don't support top_p.
+
+    Args:
+        model_id: Model identifier
+
+    Returns:
+        True if model supports top_p, False otherwise
+
+    Examples:
+        >>> supports_top_p("gpt-4o")
+        True
+        >>> supports_top_p("o3-mini")
+        False
+        >>> supports_top_p("gpt-5_2025-08-07")
+        False
+    """
+    # top_p support follows the same rules as temperature
+    return supports_temperature(model_id)
+
+
 def supports_reasoning_effort(model_id: str) -> bool:
     """
     Check if model supports reasoning_effort parameter.

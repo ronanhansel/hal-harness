@@ -4,3 +4,4 @@ botocore==1.37.1
 litellm
 pipreqs
 openai>=1.70
+msal

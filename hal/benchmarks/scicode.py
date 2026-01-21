@@ -29,18 +29,28 @@ class SciCodeBenchmark(BaseBenchmark):
         """Load dataset from custom path or HuggingFace."""
         # Check environment variable first
         custom_path = os.environ.get("SCICODE_DATASET_PATH")
+        print(f"[SciCode] SCICODE_DATASET_PATH env var: {custom_path}")
 
         # Also check config for dataset_path
         if not custom_path and config:
             custom_path = config.get("dataset_path")
+            print(f"[SciCode] dataset_path from config: {custom_path}")
 
-        if custom_path and os.path.exists(custom_path):
-            print(f"Loading SciCode dataset from custom path: {custom_path}")
-            with open(custom_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+        if custom_path:
+            exists = os.path.exists(custom_path)
+            print(f"[SciCode] Custom path exists: {exists}")
+            if exists:
+                print(f"[SciCode] Loading dataset from custom path: {custom_path}")
+                with open(custom_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                print(f"[SciCode] Loaded {len(data)} tasks from custom dataset")
+                return data
 
         # Default: load from HuggingFace
-        return list(load_dataset("SciCode1/SciCode", split="test"))
+        print(f"[SciCode] Loading from HuggingFace (no custom path or path doesn't exist)")
+        data = list(load_dataset("SciCode1/SciCode", split="test"))
+        print(f"[SciCode] Loaded {len(data)} tasks from HuggingFace")
+        return data
         
     def evaluate_output(self, agent_output: Dict[str, Any], run_id: str) -> Dict[str, Any]:
         """Run SciCode evaluation harness on agent outputs"""

@@ -962,15 +962,43 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
     model_params['num_retries'] = int(os.environ.get('LITELLM_NUM_RETRIES', 35))
     model_params['timeout'] = int(os.environ.get('LITELLM_REQUEST_TIMEOUT', 600))
 
-    # Use direct Azure if enabled (faster, no proxy overhead)
-    if os.environ.get('USE_DIRECT_AZURE', '').lower() == 'true':
+    # Determine if we should use Azure/TRAPI direct access
+    # Default to Azure/TRAPI for all OpenAI models (faster, more reliable)
+    def _should_use_azure():
+        # Explicit opt-out
+        if os.environ.get('USE_TRAPI', '').lower() == 'false':
+            return False
+        if os.environ.get('USE_DIRECT_AZURE', '').lower() == 'false':
+            return False
+
+        # Normalize model name
+        model_lower = model_params.get('model_id', '').lower()
+        for prefix in ('openai/', 'azure/'):
+            if model_lower.startswith(prefix):
+                model_lower = model_lower[len(prefix):]
+                break
+
+        # Use TRAPI for all OpenAI models by default
+        is_openai_model = (
+            'gpt-' in model_lower or
+            model_lower.startswith('gpt-') or
+            model_lower.startswith('o1') or
+            model_lower.startswith('o3') or
+            model_lower.startswith('o4') or
+            'deepseek' in model_lower
+        )
+        return is_openai_model
+
+    # Use Azure direct for OpenAI models (faster, no proxy overhead)
+    if _should_use_azure():
         try:
             from azure_direct_model import AzureDirectModel
             print(f"[INFO] Using AzureDirectModel for direct TRAPI access")
             model = AzureDirectModel(
                 model_id=model_params.get('model_id', kwargs['model_name']),
                 temperature=model_params.get('temperature', 0.7),
-                num_retries=model_params.get('num_retries', 5),
+                num_retries=model_params.get('num_retries', 500),
+                timeout=model_params.get('timeout', 1800),
                 **{k: v for k, v in kwargs.items() if k in ['reasoning_effort']}
             )
         except Exception as e:

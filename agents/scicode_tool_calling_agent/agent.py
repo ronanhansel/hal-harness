@@ -376,8 +376,35 @@ def get_agent(model_params) -> CodeAgent:
     Returns:
         CodeAgent: An instance of CodeAgent configured with the specified model.
     """
-    # Initialize model - use AzureDirectModel if USE_DIRECT_AZURE is set
-    if os.environ.get('USE_DIRECT_AZURE', '').lower() == 'true':
+    # Determine if we should use Azure/TRAPI direct access
+    # Default to Azure/TRAPI for all OpenAI models (faster, more reliable)
+    def _should_use_azure():
+        # Explicit opt-out
+        if os.environ.get('USE_TRAPI', '').lower() == 'false':
+            return False
+        if os.environ.get('USE_DIRECT_AZURE', '').lower() == 'false':
+            return False
+
+        # Normalize model name
+        model_lower = model_params.get('model_id', '').lower()
+        for prefix in ('openai/', 'azure/'):
+            if model_lower.startswith(prefix):
+                model_lower = model_lower[len(prefix):]
+                break
+
+        # Use TRAPI for all OpenAI models by default
+        is_openai_model = (
+            'gpt-' in model_lower or
+            model_lower.startswith('gpt-') or
+            model_lower.startswith('o1') or
+            model_lower.startswith('o3') or
+            model_lower.startswith('o4') or
+            'deepseek' in model_lower
+        )
+        return is_openai_model
+
+    # Initialize model - use AzureDirectModel for OpenAI models
+    if _should_use_azure():
         azure_model_loaded = False
         # Try shared module first
         try:
@@ -406,8 +433,12 @@ def get_agent(model_params) -> CodeAgent:
                 )
             except Exception as e:
                 print(f"[WARNING] Failed to use AzureDirectModel: {e}. Falling back to LiteLLMModel.")
+                import litellm
+                litellm.drop_params = True
                 model = LiteLLMModel(**model_params)
     else:
+        import litellm
+        litellm.drop_params = True
         model = LiteLLMModel(**model_params)
 
     # Create a CodeAgent instance with the specified model

@@ -1,6 +1,5 @@
 from litellm_engine import LiteLlmEngine
 
-from litellm import model_cost
 from litellm.utils import trim_messages
 from pathlib import Path
 from shutil import rmtree
@@ -9,6 +8,8 @@ import os
 import re
 import shutil
 import subprocess
+
+
 
 SYSTEM_PROMPT = """You are an expert Python programming assistant that helps scientist users to write high-quality code to solve their tasks.
 Given a user request, you are expected to write a complete program that accomplishes the requested task and save any outputs in the correct format.
@@ -38,18 +39,11 @@ class ScienceAgent():
     def __init__(self, llm_engine_name, context_cutoff=28000, max_tokens=4096, reasoning_effort=None, use_self_debug=False, use_knowledge=False):
         self.llm_engine = LiteLlmEngine(llm_engine_name, reasoning_effort)
 
-        if llm_engine_name == "together_ai/deepseek-ai/DeepSeek-V3":
-            self.llm_cost = {
-                "input_cost_per_token": 1.25/1e6,
-                "output_cost_per_token": 1.25/1e6
-            }
-        elif llm_engine_name == "together_ai/deepseek-ai/DeepSeek-R1":
-            self.llm_cost = {
-                "input_cost_per_token": 3/1e6,
-                "output_cost_per_token": 7/1e6
-            }
-        else:
-            self.llm_cost = model_cost[llm_engine_name]
+        # Cost tracking disabled - set dummy values
+        self.llm_cost = {
+            "input_cost_per_token": 0,
+            "output_cost_per_token": 0
+        }
 
         self.context_cutoff = context_cutoff
         self.max_tokens = max_tokens
