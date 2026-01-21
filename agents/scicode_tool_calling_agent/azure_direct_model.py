@@ -428,7 +428,8 @@ class AzureDirectModel(Model):
             request_params["extra_headers"] = {"extra-parameters": "pass-through"}
 
         try:
-            response = self.client.chat.completions.create(**request_params)
+            # Call Azure OpenAI with optional Weave tracing
+            response = self._traced_completion_create(request_params)
             content = response.choices[0].message.content or ""
 
             # Strip thinking tags for deepseek
@@ -447,6 +448,23 @@ class AzureDirectModel(Model):
         except Exception as e:
             print(f"[AzureDirectModel] Error calling {self.deployment_name}: {type(e).__name__}: {e}")
             raise
+
+    def _traced_completion_create(self, request_params: Dict[str, Any]):
+        """
+        Call Azure OpenAI API with optional Weave tracing.
+        Falls back to direct call if Weave is not available.
+        """
+        try:
+            import weave
+            # Create a traced wrapper for the API call
+            @weave.op(name=f"AzureOpenAI.chat.completions.create")
+            def _create_with_weave(params):
+                return self.client.chat.completions.create(**params)
+
+            return _create_with_weave(request_params)
+        except (ImportError, Exception):
+            # Fall back to direct call without tracing
+            return self.client.chat.completions.create(**request_params)
 
     def generate(
         self,
