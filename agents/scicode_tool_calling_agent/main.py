@@ -168,6 +168,9 @@ def run(input: dict[str, Any], **kwargs) -> dict[str, str]:
                     response = response.replace("```python", "").replace("```", "").strip()
                 except Exception as e:
                     print(f"Error running agent for step {i+1}: {e}")
+                    # Print full traceback for debugging
+                    import traceback
+                    print(f"Full traceback:\n{traceback.format_exc()}")
                     # Provide a minimal fallback response
                     response = f"# Error occurred: {str(e)}\n# Please implement the required function manually"
 
