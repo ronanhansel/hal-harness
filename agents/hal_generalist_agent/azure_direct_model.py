@@ -453,13 +453,14 @@ class AzureDirectModel(Model):
         messages: List[Dict[str, str]],
         stop_sequences: Optional[List[str]] = None,
         grammar: Optional[str] = None,
+        tools_to_call_from: Optional[List[Any]] = None,
         **kwargs,
     ) -> ChatMessage:
         """
         Generate method - alias for __call__ for compatibility with smolagents.
         Some versions of smolagents call generate() instead of __call__().
         """
-        return self.__call__(messages, stop_sequences, grammar, **kwargs)
+        return self.__call__(messages, stop_sequences, grammar, tools_to_call_from, **kwargs)
 
     def _supports_stop(self) -> bool:
         """Check if model supports stop parameter."""
