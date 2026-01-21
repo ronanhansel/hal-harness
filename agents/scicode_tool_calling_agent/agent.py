@@ -378,19 +378,35 @@ def get_agent(model_params) -> CodeAgent:
     """
     # Initialize model - use AzureDirectModel if USE_DIRECT_AZURE is set
     if os.environ.get('USE_DIRECT_AZURE', '').lower() == 'true':
+        azure_model_loaded = False
+        # Try shared module first
         try:
-            from azure_direct_model import AzureDirectModel
-            print(f"[INFO] Using AzureDirectModel for direct TRAPI access")
-            model = AzureDirectModel(
-                model_id=model_params.get('model_id', 'gpt-4o'),
+            from shared.agent_wrapper import create_model_for_agent
+            print(f"[INFO] Using shared module for Azure model creation")
+            model = create_model_for_agent(
+                model_name=model_params.get('model_id', 'gpt-4o'),
+                reasoning_effort=model_params.get('reasoning_effort'),
                 temperature=model_params.get('temperature', 0.7),
-                max_tokens=model_params.get('max_tokens', 4096),
-                num_retries=model_params.get('num_retries', 500),
-                timeout=model_params.get('timeout', 1800),
             )
-        except Exception as e:
-            print(f"[WARNING] Failed to use AzureDirectModel: {e}. Falling back to LiteLLMModel.")
-            model = LiteLLMModel(**model_params)
+            azure_model_loaded = True
+        except ImportError:
+            pass
+
+        # Fallback to local azure_direct_model
+        if not azure_model_loaded:
+            try:
+                from azure_direct_model import AzureDirectModel
+                print(f"[INFO] Using AzureDirectModel for direct TRAPI access")
+                model = AzureDirectModel(
+                    model_id=model_params.get('model_id', 'gpt-4o'),
+                    temperature=model_params.get('temperature', 0.7),
+                    max_tokens=model_params.get('max_tokens', 4096),
+                    num_retries=model_params.get('num_retries', 500),
+                    timeout=model_params.get('timeout', 1800),
+                )
+            except Exception as e:
+                print(f"[WARNING] Failed to use AzureDirectModel: {e}. Falling back to LiteLLMModel.")
+                model = LiteLLMModel(**model_params)
     else:
         model = LiteLLMModel(**model_params)
 

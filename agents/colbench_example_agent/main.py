@@ -3,37 +3,40 @@ import re
 import sys
 from pathlib import Path
 
-# Add current directory to path for local imports (for bundled sweet_rl and azure_client)
+# Add current directory and agents directory to path for imports
 _this_dir = Path(__file__).resolve().parent
+_agents_dir = _this_dir.parent
 if str(_this_dir) not in sys.path:
     sys.path.insert(0, str(_this_dir))
+if str(_agents_dir) not in sys.path:
+    sys.path.insert(0, str(_agents_dir))
 
 from sweet_rl.environments.human_interaction_env import HumanInteractionEnv
 from sweet_rl.environments.human_design_interaction_env import HumanDesignInteractionEnv
 from openai import OpenAI
 import anthropic
 
-# Import Azure TRAPI client
-from azure_client import get_trapi_client, TRAPI_DEPLOYMENT_MAP, resolve_deployment_name
+# Import from shared module (preferred) or fall back to local azure_client
+try:
+    from shared.azure_utils import get_trapi_client, resolve_deployment_name, TRAPI_DEPLOYMENT_MAP
+    from shared.model_utils import uses_max_completion_tokens
+except ImportError:
+    # Fallback to local azure_client for backwards compatibility
+    from azure_client import get_trapi_client, TRAPI_DEPLOYMENT_MAP, resolve_deployment_name
+
+    def uses_max_completion_tokens(model_id: str) -> bool:
+        """Check if model uses max_completion_tokens instead of max_tokens."""
+        model_lower = model_id.lower()
+        if model_lower.startswith("o1") or model_lower.startswith("o3") or model_lower.startswith("o4"):
+            return True
+        if model_lower.startswith("gpt-5") or "gpt-5" in model_lower:
+            return True
+        return False
 
 
 def get_trapi_deployment(model_name: str) -> str:
     """Map model name to TRAPI deployment name."""
-    # Use the azure_client's resolve function
     return resolve_deployment_name(model_name)
-
-
-def uses_max_completion_tokens(model_id: str) -> bool:
-    """Check if model uses max_completion_tokens instead of max_tokens.
-    O-series and GPT-5 models use max_completion_tokens."""
-    model_lower = model_id.lower()
-    # O-series models (o1, o3, o4-mini)
-    if model_lower.startswith("o1") or model_lower.startswith("o3") or model_lower.startswith("o4"):
-        return True
-    # GPT-5 series
-    if model_lower.startswith("gpt-5") or "gpt-5" in model_lower:
-        return True
-    return False
 
 
 class APIAgent:

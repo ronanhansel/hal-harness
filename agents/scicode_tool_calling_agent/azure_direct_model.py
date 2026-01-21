@@ -31,10 +31,16 @@ try:
         uses_max_completion_tokens,
         requires_extra_headers,
         strip_thinking_tags,
+        # TRAPI deployment functions
+        is_available_on_trapi,
+        get_trapi_deployment,
+        validate_trapi_model,
+        TRAPI_DEPLOYMENT_MAP,
     )
     MODEL_QUIRKS_AVAILABLE = True
 except ImportError:
     MODEL_QUIRKS_AVAILABLE = False
+    TRAPI_DEPLOYMENT_MAP = {}  # Fallback empty map
 
 # Import smolagents Tool for type annotations
 try:
@@ -173,57 +179,26 @@ except ImportError:
             self.raw = raw
 
 
-# TRAPI deployment name mapping
-TRAPI_DEPLOYMENT_MAP = {
-    # GPT-5 series
-    'gpt-5': 'gpt-5_2025-08-07',
-    'gpt-5-mini': 'gpt-5-mini_2025-08-07',
-    'gpt-5-nano': 'gpt-5-nano_2025-08-07',
-    'gpt-5-pro': 'gpt-5-pro_2025-10-06',
-
-    # GPT-4 series
-    'gpt-4o': 'gpt-4o_2024-11-20',
-    'gpt-4o-mini': 'gpt-4o-mini_2024-07-18',
-    'gpt-4.1': 'gpt-4.1_2025-04-14',
-    'gpt-4.1-mini': 'gpt-4.1-mini_2025-04-14',
-    'gpt-4.1-nano': 'gpt-4.1-nano_2025-04-14',
-    'gpt-4-turbo': 'gpt-4_turbo-2024-04-09',
-    'gpt-4-32k': 'gpt-4-32k_0613',
-    'gpt-4': 'gpt-4_turbo-2024-04-09',
-
-    # O-series (reasoning models)
-    'o1': 'o1_2024-12-17',
-    'o1-mini': 'o1-mini_2024-09-12',
-    'o3': 'o3_2025-04-16',
-    'o3-mini': 'o3-mini_2025-01-31',
-    'o4-mini': 'o4-mini_2025-04-16',
-
-    # GPT-5.1 series
-    'gpt-5.1': 'gpt-5.1_2025-11-13',
-    'gpt-5.1-chat': 'gpt-5.1-chat_2025-11-13',
-    'gpt-5.1-codex': 'gpt-5.1-codex_2025-11-13',
-    'gpt-5.1-codex-mini': 'gpt-5.1-codex-mini_2025-11-13',
-
-    # Other models
-    'grok-3.1': 'grok-3_1',
-    'llama-3.3': 'gcr-llama-33-70b-shared',
-    'llama-3.1-70b': 'gcr-llama-31-70b-shared',
-    'llama-3.1-8b': 'gcr-llama-31-8b-instruct',
-    'qwen3-8b': 'gcr-qwen3-8b',
-    'phi4': 'gcr-phi-4-shared',
-    'mistral': 'gcr-mistralai-8x7b-shared',
-    'deepseek-r1': 'deepseek-r1_1',
-    'deepseek': 'deepseek-r1_1',
-
-    # Embeddings
-    'text-embedding-3-large': 'text-embedding-3-large_1',
-    'text-embedding-3-small': 'text-embedding-3-small_1',
-    'text-embedding-ada-002': 'text-embedding-ada-002_2',
-}
+# TRAPI deployment name mapping - imported from model_quirks
+# The TRAPI_DEPLOYMENT_MAP is now centralized in model_quirks.py
+# This ensures consistent behavior across all agents
 
 
 def resolve_deployment_name(model: str) -> str:
-    """Resolve friendly model name to TRAPI deployment name."""
+    """Resolve friendly model name to TRAPI deployment name.
+
+    Uses the shared model_quirks module for consistency.
+    Will raise ValueError for models not available on TRAPI (e.g., DeepSeek-V3).
+    """
+    if MODEL_QUIRKS_AVAILABLE:
+        # Use the shared function which properly validates model availability
+        try:
+            return get_trapi_deployment(model, strict=True)
+        except ValueError as e:
+            # Re-raise with clear error message
+            raise ValueError(f"Cannot use model '{model}' with TRAPI: {e}")
+
+    # Fallback for when model_quirks is not available
     # Remove common prefixes
     model = model.replace('azure/', '').replace('openai/', '')
 
