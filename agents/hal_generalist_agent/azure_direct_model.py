@@ -448,6 +448,19 @@ class AzureDirectModel(Model):
             print(f"[AzureDirectModel] Error calling {self.deployment_name}: {type(e).__name__}: {e}")
             raise
 
+    def generate(
+        self,
+        messages: List[Dict[str, str]],
+        stop_sequences: Optional[List[str]] = None,
+        grammar: Optional[str] = None,
+        **kwargs,
+    ) -> ChatMessage:
+        """
+        Generate method - alias for __call__ for compatibility with smolagents.
+        Some versions of smolagents call generate() instead of __call__().
+        """
+        return self.__call__(messages, stop_sequences, grammar, **kwargs)
+
     def _supports_stop(self) -> bool:
         """Check if model supports stop parameter."""
         model_lower = self.model_id.lower()
