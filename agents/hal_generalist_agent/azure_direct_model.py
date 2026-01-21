@@ -15,6 +15,15 @@ from typing import List, Dict, Any, Optional, Callable
 
 from openai import AzureOpenAI
 
+# Import smolagents Tool for type annotations
+try:
+    from smolagents import Tool
+    from smolagents.utils import get_tool_json_schema
+except ImportError:
+    # Will be imported later if available
+    Tool = Any
+    get_tool_json_schema = None
+
 # Try to import azure-identity (may not be available in all environments)
 try:
     from azure.identity import (
@@ -340,6 +349,7 @@ class AzureDirectModel(Model):
         messages: List[Dict[str, str]],
         stop_sequences: Optional[List[str]] = None,
         grammar: Optional[str] = None,
+        tools_to_call_from: Optional[List[Any]] = None,
         **kwargs,
     ) -> ChatMessage:
         """
@@ -349,6 +359,7 @@ class AzureDirectModel(Model):
             messages: List of message dicts with 'role' and 'content'
             stop_sequences: Optional stop sequences
             grammar: Optional grammar constraint (not supported)
+            tools_to_call_from: Optional list of Tool objects for function calling
 
         Returns:
             ChatMessage with the model's response
@@ -392,6 +403,20 @@ class AzureDirectModel(Model):
         if stop_sequences and self._supports_stop():
             request_params["stop"] = stop_sequences
 
+        # Tools parameter for function calling
+        if tools_to_call_from:
+            # Import here to avoid circular dependency
+            if get_tool_json_schema is None:
+                from smolagents.utils import get_tool_json_schema as _get_schema
+                tools_json = [_get_schema(tool) for tool in tools_to_call_from]
+            else:
+                tools_json = [get_tool_json_schema(tool) for tool in tools_to_call_from]
+
+            request_params.update({
+                "tools": tools_json,
+                "tool_choice": "required",
+            })
+
         # Reasoning effort for O-series models
         if "reasoning_effort" in kwargs:
             request_params["reasoning_effort"] = kwargs["reasoning_effort"]
@@ -409,6 +434,14 @@ class AzureDirectModel(Model):
             # Strip thinking tags for deepseek
             if 'deepseek' in self.model_id.lower():
                 content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
+
+            # Track token counts (required by smolagents Model.get_token_counts())
+            if hasattr(response, 'usage') and response.usage:
+                self.last_input_token_count = response.usage.prompt_tokens
+                self.last_output_token_count = response.usage.completion_tokens
+            else:
+                self.last_input_token_count = None
+                self.last_output_token_count = None
 
             return ChatMessage(role="assistant", content=content, raw=response)
         except Exception as e:
