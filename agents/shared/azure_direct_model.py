@@ -487,11 +487,15 @@ class AzureDirectModel(Model):
                 "tool_choice": "required",
             })
 
-        # Reasoning effort for O-series models
-        if "reasoning_effort" in kwargs:
-            request_params["reasoning_effort"] = kwargs["reasoning_effort"]
-        elif "reasoning_effort" in self.kwargs:
-            request_params["reasoning_effort"] = self.kwargs["reasoning_effort"]
+        # Reasoning effort for O-series and GPT-5 models only
+        # Only add if value is not None AND model supports it
+        reasoning_effort = kwargs.get("reasoning_effort") or self.kwargs.get("reasoning_effort")
+        if reasoning_effort is not None:
+            # Check if model supports reasoning_effort
+            model_lower = self.model_id.lower()
+            is_reasoning_model = any(model_lower.startswith(p) for p in ['o1', 'o3', 'o4']) or 'gpt-5' in model_lower
+            if is_reasoning_model:
+                request_params["reasoning_effort"] = reasoning_effort
 
         # Handle deepseek extra headers
         if 'deepseek' in self.model_id.lower():

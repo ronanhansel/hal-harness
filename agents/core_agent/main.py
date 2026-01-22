@@ -646,11 +646,14 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
     if use_azure:
         try:
             # Use the shared AzureDirectModel from shared/azure_direct_model.py
-            model = AzureDirectModel(
-                model_id=model_id,
-                temperature=model_params.get('temperature', 0.7),
-                reasoning_effort=kwargs.get('reasoning_effort'),
-            )
+            # Only pass reasoning_effort if it's set (not None)
+            azure_kwargs = {
+                "model_id": model_id,
+                "temperature": model_params.get('temperature', 0.7),
+            }
+            if kwargs.get('reasoning_effort'):
+                azure_kwargs["reasoning_effort"] = kwargs['reasoning_effort']
+            model = AzureDirectModel(**azure_kwargs)
             print(f"[core_agent] Using shared AzureDirectModel for TRAPI access")
         except Exception as e:
             import traceback

@@ -994,12 +994,16 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
         try:
             from azure_direct_model import AzureDirectModel
             print(f"[INFO] Using AzureDirectModel for direct TRAPI access")
+            # Only pass reasoning_effort if it has a truthy value (not None or empty)
+            azure_extra_kwargs = {}
+            if kwargs.get('reasoning_effort'):
+                azure_extra_kwargs['reasoning_effort'] = kwargs['reasoning_effort']
             model = AzureDirectModel(
                 model_id=model_params.get('model_id', kwargs['model_name']),
                 temperature=model_params.get('temperature', 0.7),
                 num_retries=model_params.get('num_retries', 500),
                 timeout=model_params.get('timeout', 1800),
-                **{k: v for k, v in kwargs.items() if k in ['reasoning_effort']}
+                **azure_extra_kwargs
             )
         except Exception as e:
             import traceback
