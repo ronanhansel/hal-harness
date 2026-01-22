@@ -1,6 +1,7 @@
 # This is an example agent that generates code for the SciCode benchmark in a zero-shot format.
 from openai import OpenAI
 import os
+import logging
 from typing import Any
 from pathlib import Path
 from agent import get_agent
@@ -11,6 +12,13 @@ import warnings
 warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValue.*", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*Use 'content=<...>' to upload raw bytes/text content.*", category=DeprecationWarning)
 warnings.filterwarnings("ignore", message=".*deprecated.*", module="weave.trace_server.trace_server_interface")
+
+# Configure litellm verbose logging for retry visibility
+if os.environ.get('LITELLM_VERBOSE', '').lower() in ('1', 'true', 'yes'):
+    litellm.set_verbose = True
+    logging.getLogger("LiteLLM").setLevel(logging.DEBUG)
+    logging.getLogger("LiteLLM Proxy").setLevel(logging.DEBUG)
+    logging.getLogger("LiteLLM Router").setLevel(logging.DEBUG)
 
 # Get the directory where this script is located (for resolving relative paths)
 SCRIPT_DIR = Path(__file__).resolve().parent
