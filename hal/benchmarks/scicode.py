@@ -2,6 +2,7 @@ import os
 import json
 import time
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Dict, Any, List
 from datasets import load_dataset
@@ -56,8 +57,7 @@ class SciCodeBenchmark(BaseBenchmark):
         """Run SciCode evaluation harness on agent outputs"""
         start_time = time.time()
         # Create a temporary directory on the host for evaluation files.
-        host_tmp_dir = Path(f"tmp_{run_id}_{start_time}")
-        host_tmp_dir.mkdir(parents=True, exist_ok=True)
+        host_tmp_dir = Path(tempfile.mkdtemp(prefix=f"scicode_eval_{run_id}_"))
 
         if self.benchmark_name == 'scicode_hard':
             # Iterate through problems 

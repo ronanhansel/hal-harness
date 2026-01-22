@@ -261,15 +261,28 @@ def list_images(client: docker.DockerClient):
     """
     List all images from the Docker client.
     """
-    # don't use this in multi-threaded context
-    # Handle race condition where images may be deleted between list() and tag access
+    # Avoid docker-py list() -> inspect() race by using the low-level API.
     tags = set()
-    for i in client.images.list(all=True):
+    images = []
+    for attempt in range(2):
         try:
-            tags.update(i.tags)
+            images = client.api.images(all=True)
+            break
         except docker.errors.ImageNotFound:
-            # Image was deleted between list() and accessing tags - skip it
-            continue
+            if attempt == 0:
+                time.sleep(0.2)
+                continue
+            return set()
+        except docker.errors.APIError:
+            if attempt == 0:
+                time.sleep(0.2)
+                continue
+            raise
+
+    for img in images:
+        for tag in img.get("RepoTags") or []:
+            if tag and tag != "<none>:<none>":
+                tags.add(tag)
     return tags
 
 

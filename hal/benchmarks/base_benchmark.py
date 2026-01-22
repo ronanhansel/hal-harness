@@ -20,7 +20,7 @@ class BaseBenchmark(ABC):
         self.benchmark_name: str
         self.requirements_file: str
         self.setup_script = setup_script # Path to setup script relative to benchmark dir
-        self.base_results_dir = "results"
+        self.base_results_dir = os.environ.get("HAL_RESULTS_DIR", "results")
         self.benchmark_results_dir = os.path.join(self.base_results_dir, self.benchmark_name)
         self.agent_args: Dict[str, Any] = {}  # Store agent args
         self.requires_sandbox = requires_sandbox # Whether benchmark requires VM execution
@@ -159,4 +159,3 @@ class BaseBenchmark(ABC):
     def upload_results(self, run_id: str, results: Dict[str, Any]):
         """Upload results to storage. Override if needed."""
         pass
-
