@@ -5,6 +5,7 @@ import uuid
 import subprocess
 import asyncio
 import logging
+import time
 from typing import Dict, Any, Optional
 from pathlib import Path
 from hal.benchmarks.base_benchmark import BaseBenchmark
@@ -74,12 +75,34 @@ class LocalRunner:
             return merged_results
 
         finally:
-            # Cleanup temp directories
+            # Cleanup temp directories - CRITICAL: Must succeed to avoid filling up /tmp
             for temp_dir in self.temp_dirs:
-                try:
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                except Exception as e:
-                    print(f"Warning: Failed to cleanup {temp_dir}: {e}")
+                cleanup_success = False
+                for attempt in range(3):
+                    try:
+                        if os.path.exists(temp_dir):
+                            shutil.rmtree(temp_dir)
+                            cleanup_success = True
+                            break
+                        else:
+                            cleanup_success = True
+                            break
+                    except Exception as e:
+                        print(f"Cleanup attempt {attempt+1}/3 failed for {temp_dir}: {e}")
+                        time.sleep(0.5)
+
+                if not cleanup_success and os.path.exists(temp_dir):
+                    # Last resort: try subprocess rm -rf
+                    try:
+                        import subprocess
+                        subprocess.run(["rm", "-rf", str(temp_dir)], timeout=60, check=False)
+                        if not os.path.exists(temp_dir):
+                            cleanup_success = True
+                    except Exception as e:
+                        print(f"rm -rf cleanup failed for {temp_dir}: {e}")
+
+                if not cleanup_success and os.path.exists(temp_dir):
+                    print(f"CRITICAL: Failed to cleanup temp directory {temp_dir} - disk space may fill up!")
 
     async def _process_task(self,
                           task_id: str,

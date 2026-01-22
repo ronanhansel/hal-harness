@@ -189,14 +189,13 @@ def run(input: dict[str, Any], **kwargs) -> dict[str, str]:
                             max_tokens=1024,  # Shorter for cleaning task
                         )
                     except Exception as e:
-                        print(f"[WARNING] Failed to use AzureDirectModel for cleaning: {e}. Falling back to LiteLLMModel.")
-                        from smolagents import LiteLLMModel
-                        cleaning_model_params = model_params.copy()
-                        cleaning_model = LiteLLMModel(**cleaning_model_params)
+                        import traceback
+                        print(f"[ERROR] Failed to use AzureDirectModel for cleaning: {e}")
+                        print(f"[ERROR] Traceback: {traceback.format_exc()}")
+                        raise RuntimeError(f"AzureDirectModel initialization failed for cleaning model: {e}")
                 else:
-                    from smolagents import LiteLLMModel
-                    cleaning_model_params = model_params.copy()
-                    cleaning_model = LiteLLMModel(**cleaning_model_params)
+                    # Should not happen - we always want TRAPI
+                    raise RuntimeError(f"use_azure=False but TRAPI is required for cleaning model.")
                 
                 # Normalize the agent output to a string
                 raw = response if isinstance(response, str) else getattr(response, "content", "")

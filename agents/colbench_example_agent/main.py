@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import importlib.util
 from pathlib import Path
 
 # CRITICAL: Add current directory to path FIRST, before any other imports
@@ -8,7 +9,7 @@ from pathlib import Path
 _this_dir = Path(__file__).resolve().parent
 _agents_dir = _this_dir.parent
 
-# Force add to beginning of sys.path (don't just check if present)
+# Force add to beginning of sys.path
 sys.path.insert(0, str(_this_dir))
 sys.path.insert(0, str(_agents_dir))
 
@@ -17,7 +18,37 @@ print(f"[colbench_agent] _this_dir = {_this_dir}")
 print(f"[colbench_agent] sweet_rl dir exists = {(_this_dir / 'sweet_rl').exists()}")
 print(f"[colbench_agent] sys.path[0:5] = {sys.path[0:5]}")
 
-# Import sweet_rl - should work now that path is set
+# CRITICAL: Explicitly load sweet_rl and its submodules into sys.modules
+# This is needed because importlib.util.spec_from_file_location doesn't always
+# respect sys.path modifications made after Python starts
+def _load_local_module(name, path):
+    """Load a local module by path and register it in sys.modules."""
+    if name in sys.modules:
+        return sys.modules[name]
+    init_path = path / "__init__.py"
+    if not init_path.exists():
+        print(f"[colbench_agent] WARNING: No __init__.py found at {init_path}")
+        return None
+    spec = importlib.util.spec_from_file_location(name, str(init_path),
+                                                   submodule_search_locations=[str(path)])
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+# Load sweet_rl hierarchy explicitly
+sweet_rl_dir = _this_dir / "sweet_rl"
+if sweet_rl_dir.exists():
+    print(f"[colbench_agent] Loading sweet_rl from {sweet_rl_dir}")
+    _load_local_module("sweet_rl", sweet_rl_dir)
+    _load_local_module("sweet_rl.environments", sweet_rl_dir / "environments")
+    _load_local_module("sweet_rl.utils", sweet_rl_dir / "utils")
+    _load_local_module("sweet_rl.models", sweet_rl_dir / "models")
+else:
+    print(f"[colbench_agent] ERROR: sweet_rl directory not found at {sweet_rl_dir}")
+    print(f"[colbench_agent] Directory contents: {list(_this_dir.iterdir()) if _this_dir.exists() else 'DIR NOT FOUND'}")
+
+# Now import should work
 from sweet_rl.environments.human_interaction_env import HumanInteractionEnv
 from sweet_rl.environments.human_design_interaction_env import HumanDesignInteractionEnv
 

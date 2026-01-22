@@ -115,50 +115,95 @@ def get_msal_token(scope: str = 'api://trapi/.default') -> Optional[str]:
 
 
 class MSALTokenProvider:
-    """Token provider that uses MSAL to refresh tokens dynamically."""
+    """
+    Token provider that uses MSAL to refresh tokens dynamically.
+
+    This provider:
+    1. Reloads the cache file before each token acquisition (handles external updates)
+    2. Persists the cache after acquiring new tokens (keeps refresh tokens fresh)
+    3. Handles token refresh failures gracefully with detailed logging
+    """
 
     def __init__(self, scope: str = 'api://trapi/.default'):
         self.scope = scope
-        self._cache = None
-        self._app = None
-        self._init_msal()
+        self.cache_path = os.path.expanduser('~/.azure/msal_token_cache.json')
+        self._last_token_time = None
+        self._token_refresh_count = 0
 
-    def _init_msal(self):
-        """Initialize MSAL app with the Azure CLI token cache."""
+    def _load_cache(self) -> Optional[Any]:
+        """Load the MSAL cache from disk."""
         if not MSAL_AVAILABLE:
-            return
-
-        cache_path = os.path.expanduser('~/.azure/msal_token_cache.json')
-        if not os.path.exists(cache_path):
-            return
-
+            return None
+        if not os.path.exists(self.cache_path):
+            return None
         try:
-            self._cache = msal.SerializableTokenCache()
-            with open(cache_path, 'r') as f:
-                self._cache.deserialize(f.read())
-
-            self._app = msal.PublicClientApplication(
-                AZURE_CLI_CLIENT_ID,
-                authority=f'https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}',
-                token_cache=self._cache
-            )
+            cache = msal.SerializableTokenCache()
+            with open(self.cache_path, 'r') as f:
+                cache.deserialize(f.read())
+            return cache
         except Exception as e:
-            print(f"[MSALTokenProvider] Failed to initialize: {e}")
+            print(f"[MSALTokenProvider] Failed to load cache: {e}")
+            return None
+
+    def _save_cache(self, cache) -> None:
+        """Save the MSAL cache to disk if it has changed."""
+        if cache.has_state_changed:
+            try:
+                with open(self.cache_path, 'w') as f:
+                    f.write(cache.serialize())
+                print(f"[MSALTokenProvider] Cache persisted to disk")
+            except Exception as e:
+                print(f"[MSALTokenProvider] Failed to save cache: {e}")
 
     def __call__(self) -> str:
-        """Get a fresh access token."""
-        if self._app is None:
-            raise RuntimeError("MSAL not initialized - ensure ~/.azure is mounted")
+        """
+        Get a fresh access token, refreshing if necessary.
 
-        accounts = self._app.get_accounts()
+        The MSAL library handles token refresh automatically when calling
+        acquire_token_silent. If the access token is expired but refresh
+        token is valid, MSAL will get a new access token.
+        """
+        import time
+
+        if not MSAL_AVAILABLE:
+            raise RuntimeError("MSAL not available - install msal package")
+
+        # Reload cache from disk each time (handles external updates)
+        cache = self._load_cache()
+        if cache is None:
+            raise RuntimeError(f"MSAL cache not found at {self.cache_path}")
+
+        # Create app with fresh cache
+        app = msal.PublicClientApplication(
+            AZURE_CLI_CLIENT_ID,
+            authority=f'https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}',
+            token_cache=cache,
+        )
+
+        accounts = app.get_accounts()
         if not accounts:
-            raise RuntimeError("No accounts found in MSAL cache")
+            raise RuntimeError("No accounts found in MSAL cache. Run 'az login' first.")
 
-        result = self._app.acquire_token_silent([self.scope], account=accounts[0])
+        # Try to acquire token silently (uses refresh token if access token expired)
+        result = app.acquire_token_silent([self.scope], account=accounts[0])
+
         if result and 'access_token' in result:
+            # Save cache to persist any refreshed tokens
+            self._save_cache(cache)
+
+            self._token_refresh_count += 1
+            self._last_token_time = time.time()
+
+            # Log occasional refresh stats
+            if self._token_refresh_count % 100 == 0:
+                print(f"[MSALTokenProvider] Token refresh count: {self._token_refresh_count}")
+
             return result['access_token']
 
-        raise RuntimeError(f"Failed to acquire token: {result.get('error_description', 'unknown error')}")
+        # Token acquisition failed
+        error = result.get('error', 'unknown') if result else 'no result'
+        error_desc = result.get('error_description', '') if result else ''
+        raise RuntimeError(f"Token acquisition failed: {error} - {error_desc}")
 
 # Import smolagents Model base class
 try:

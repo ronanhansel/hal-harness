@@ -432,14 +432,13 @@ def get_agent(model_params) -> CodeAgent:
                     timeout=model_params.get('timeout', 1800),
                 )
             except Exception as e:
-                print(f"[WARNING] Failed to use AzureDirectModel: {e}. Falling back to LiteLLMModel.")
-                import litellm
-                litellm.drop_params = True
-                model = LiteLLMModel(**model_params)
+                import traceback
+                print(f"[ERROR] Failed to use AzureDirectModel: {e}")
+                print(f"[ERROR] Traceback: {traceback.format_exc()}")
+                raise RuntimeError(f"AzureDirectModel initialization failed: {e}. Check Azure credentials and shared module setup.")
     else:
-        import litellm
-        litellm.drop_params = True
-        model = LiteLLMModel(**model_params)
+        # Should not happen - we always want TRAPI
+        raise RuntimeError(f"use_azure=False but TRAPI is required. Set USE_DIRECT_AZURE=true. model_params={model_params}")
 
     # Create a CodeAgent instance with the specified model
     # Note: The local Python executor is patched to support:

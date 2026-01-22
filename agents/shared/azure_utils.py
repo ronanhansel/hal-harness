@@ -164,23 +164,64 @@ DEFAULT_AZURE_API_VERSION = '2024-10-21'
 DEFAULT_AZURE_SCOPE = 'https://cognitiveservices.azure.com/.default'
 
 
-def _get_msal_token_provider(scope: str) -> Optional[Callable[[], str]]:
+class MSALTokenProvider:
     """
-    Create a token provider using MSAL cache.
-    Works in Docker containers without requiring az CLI.
+    Token provider using MSAL cache with automatic refresh and persistence.
+
+    This provider:
+    1. Reloads the cache file before each token acquisition (handles external updates)
+    2. Persists the cache after acquiring new tokens (keeps refresh tokens fresh)
+    3. Handles token refresh failures gracefully with detailed logging
+    4. Supports automatic retry for transient failures
     """
-    if not MSAL_AVAILABLE:
-        return None
 
-    cache_path = os.path.expanduser('~/.azure/msal_token_cache.json')
-    if not os.path.exists(cache_path):
-        return None
+    def __init__(self, scope: str = 'api://trapi/.default'):
+        self.scope = scope
+        self.cache_path = os.path.expanduser('~/.azure/msal_token_cache.json')
+        self._last_token_time = None
+        self._token_refresh_count = 0
 
-    try:
-        cache = msal.SerializableTokenCache()
-        with open(cache_path, 'r') as f:
-            cache.deserialize(f.read())
+    def _load_cache(self):
+        """Load the MSAL cache from disk. Returns SerializableTokenCache or None."""
+        if not MSAL_AVAILABLE:
+            return None
+        if not os.path.exists(self.cache_path):
+            return None
+        try:
+            cache = msal.SerializableTokenCache()
+            with open(self.cache_path, 'r') as f:
+                cache.deserialize(f.read())
+            return cache
+        except Exception as e:
+            print(f"[MSALTokenProvider] Failed to load cache: {e}")
+            return None
 
+    def _save_cache(self, cache) -> None:
+        """Save the MSAL cache to disk if it has changed."""
+        if cache.has_state_changed:
+            try:
+                with open(self.cache_path, 'w') as f:
+                    f.write(cache.serialize())
+                print(f"[MSALTokenProvider] Cache persisted to disk")
+            except Exception as e:
+                print(f"[MSALTokenProvider] Failed to save cache: {e}")
+
+    def __call__(self) -> str:
+        """
+        Get a fresh access token, refreshing if necessary.
+
+        The MSAL library handles token refresh automatically when calling
+        acquire_token_silent. If the access token is expired but refresh
+        token is valid, MSAL will get a new access token.
+        """
+        import time
+
+        # Reload cache from disk (handles external updates)
+        cache = self._load_cache()
+        if cache is None:
+            raise RuntimeError(f"MSAL cache not found at {self.cache_path}")
+
+        # Create app with fresh cache
         app = msal.PublicClientApplication(
             AZURE_CLI_CLIENT_ID,
             authority=f'https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}',
@@ -189,17 +230,57 @@ def _get_msal_token_provider(scope: str) -> Optional[Callable[[], str]]:
 
         accounts = app.get_accounts()
         if not accounts:
-            return None
+            raise RuntimeError("No accounts found in MSAL cache. Run 'az login' first.")
 
-        def token_provider() -> str:
-            result = app.acquire_token_silent([scope], account=accounts[0])
-            if result and 'access_token' in result:
-                return result['access_token']
-            raise RuntimeError("Failed to acquire token from MSAL cache")
+        # Try to acquire token silently (uses refresh token if access token expired)
+        result = app.acquire_token_silent([self.scope], account=accounts[0])
 
-        # Test token acquisition
-        token_provider()
-        return token_provider
+        if result and 'access_token' in result:
+            # Save cache to persist any refreshed tokens
+            self._save_cache(cache)
+
+            self._token_refresh_count += 1
+            self._last_token_time = time.time()
+
+            # Log occasional refresh stats
+            if self._token_refresh_count % 100 == 0:
+                print(f"[MSALTokenProvider] Token refresh count: {self._token_refresh_count}")
+
+            return result['access_token']
+
+        # Token acquisition failed
+        error = result.get('error', 'unknown') if result else 'no result'
+        error_desc = result.get('error_description', '') if result else ''
+        raise RuntimeError(f"Token acquisition failed: {error} - {error_desc}")
+
+
+def _get_msal_token_provider(scope: str) -> Optional[Callable[[], str]]:
+    """
+    Create a token provider using MSAL cache.
+    Works in Docker containers without requiring az CLI.
+
+    Returns a callable that gets fresh tokens on each call, with
+    automatic refresh and cache persistence.
+    """
+    if not MSAL_AVAILABLE:
+        print("[azure_utils] MSAL not available - install msal package")
+        return None
+
+    cache_path = os.path.expanduser('~/.azure/msal_token_cache.json')
+    if not os.path.exists(cache_path):
+        print(f"[azure_utils] MSAL cache not found at {cache_path}")
+        return None
+
+    try:
+        # Create the token provider
+        provider = MSALTokenProvider(scope=scope)
+
+        # Test that it works
+        test_token = provider()
+        if test_token:
+            print(f"[azure_utils] MSAL token provider initialized successfully")
+            return provider
+        return None
 
     except Exception as e:
         print(f"[azure_utils] MSAL token provider failed: {e}")

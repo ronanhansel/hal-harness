@@ -104,6 +104,8 @@ xlrd
 requests
 beautifulsoup4
 aiohttp
+selenium
+webdriver-manager
 
 # =============================================================================
 # COGNITIVE MODELING

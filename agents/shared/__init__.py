@@ -3,12 +3,14 @@ Shared utilities for HAL agents.
 
 This module provides:
 - Azure/TRAPI client utilities for direct Azure access
+- AzureDirectModel for smolagents with automatic token refresh
 - Model parameter handling utilities
 - Configuration loading utilities
 - Agent compatibility wrappers
 
 Usage:
     from shared.azure_utils import get_trapi_client, resolve_deployment_name
+    from shared.azure_direct_model import AzureDirectModel, create_model
     from shared.model_utils import get_model_params, uses_max_completion_tokens
     from shared.config_utils import load_benchmark_config, build_agent_args
 """
@@ -22,6 +24,13 @@ from .azure_utils import (
     is_trapi_enabled,
     is_direct_azure_enabled,
     setup_direct_azure_env,
+    MSALTokenProvider,
+)
+
+from .azure_direct_model import (
+    AzureDirectModel,
+    create_model,
+    create_trapi_client,
 )
 
 from .model_utils import (
@@ -58,6 +67,11 @@ __all__ = [
     "is_trapi_enabled",
     "is_direct_azure_enabled",
     "setup_direct_azure_env",
+    "MSALTokenProvider",
+    # Azure Direct Model for smolagents
+    "AzureDirectModel",
+    "create_model",
+    "create_trapi_client",
     # Model utilities
     "uses_max_completion_tokens",
     "supports_temperature",

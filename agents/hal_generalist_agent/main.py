@@ -1002,10 +1002,13 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
                 **{k: v for k, v in kwargs.items() if k in ['reasoning_effort']}
             )
         except Exception as e:
-            print(f"[WARNING] Failed to use AzureDirectModel: {e}. Falling back to LiteLLMModel.")
-            model = LiteLLMModel(**model_params)
+            import traceback
+            print(f"[ERROR] Failed to use AzureDirectModel: {e}")
+            print(f"[ERROR] Traceback: {traceback.format_exc()}")
+            raise RuntimeError(f"AzureDirectModel initialization failed: {e}. Check Azure credentials and shared module setup.")
     else:
-        model = LiteLLMModel(**model_params)
+        # Should not happen - we always want TRAPI
+        raise RuntimeError(f"_should_use_azure() returned False. Set USE_TRAPI=true or USE_DIRECT_AZURE=true. model_params={model_params}")
     
     CORE_TOOLS = [
         # DuckDuckGoSearchTool(),
@@ -1429,8 +1432,8 @@ Here is the question and attached files are stored in your current directory:
         The answer should be a piece of raw python function.
         """
         
-        response = asyncio.run(agent.arun(instruction))
-        
+        response = agent.run(instruction)
+
         dialogue_history = [{"role": d["role"], "content": d["content"]} for d in isolated_env.get_dialogue_history()]
         answer = isolated_env.answer
         return {task_id: {"answer": answer, "dialogue_history": dialogue_history, "task":{
@@ -1509,7 +1512,7 @@ Here is the question and attached files are stored in your current directory:
         The answer should be a piece of raw html code.
         """
         
-        response = asyncio.run(agent.arun(instruction))
+        response = agent.run(instruction)
         isolated_env.driver.quit()
         dialogue_history = [{"role": d["role"], "content": d["content"]} for d in isolated_env.get_dialogue_history()]
         answer = isolated_env.answer
@@ -2248,8 +2251,17 @@ import asyncio
 
 async def run_inspect(sample: dict[str, Any], **kwargs) -> dict[str, Any]:
     from inspect_ai.util import sandbox
-    
-    model = LiteLLMModel(model_id='openai/gpt-4o-mini-2024-07-18')
+    from azure_direct_model import AzureDirectModel
+
+    # Use AzureDirectModel for TRAPI access (bypasses LiteLLM)
+    model_name = kwargs.get('model_name', 'gpt-4o-mini-2024-07-18')
+    model = AzureDirectModel(
+        model_id=model_name,
+        temperature=0.7,
+        num_retries=500,
+        timeout=1800,
+        **{k: v for k, v in kwargs.items() if k in ['reasoning_effort']}
+    )
         
     @tool
     async def execute_bash(command: str) -> str:
@@ -2300,10 +2312,10 @@ async def run_inspect(sample: dict[str, Any], **kwargs) -> dict[str, Any]:
     
         
     if kwargs['benchmark_name'] == 'inspect_evals/gaia':
-        response = await agent.arun(sample["input"][0]["content"])
-        
+        response = agent.run(sample["input"][0]["content"])
+
     elif kwargs['benchmark_name'] == 'inspect_evals/cybench':
-        response = await agent.arun(sample["input"][0]["content"])
+        response = agent.run(sample["input"][0]["content"])
     else:
         raise ValueError(f"Unknown benchmark. HAL agent does not support this benchmark: {kwargs['benchmark_name']}")
 

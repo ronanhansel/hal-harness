@@ -18,6 +18,17 @@ _agents_dir = Path(__file__).resolve().parent.parent
 if str(_agents_dir) not in sys.path:
     sys.path.insert(0, str(_agents_dir))
 
+# Import shared Azure/TRAPI utilities
+try:
+    from shared.azure_utils import get_trapi_client, resolve_deployment_name, is_trapi_enabled
+    from shared.model_utils import uses_max_completion_tokens, supports_temperature, is_reasoning_model
+    from shared.azure_direct_model import AzureDirectModel
+    SHARED_AZURE_AVAILABLE = True
+    print("[core_agent] Shared Azure modules loaded successfully")
+except ImportError as e:
+    SHARED_AZURE_AVAILABLE = False
+    print(f"[core_agent] Shared Azure modules not available: {e}")
+
 # Monkey-patch smolagents to handle GPT-5
 import smolagents.models
 import re
@@ -617,54 +628,38 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
         # Non-fatal: if litellm is unavailable or wrapping fails, continue without provider pinning
         print(f"[WARNING] Failed to enable OpenRouter provider pinning: {e}")
 
-    # Determine if we should use Azure/TRAPI direct access
-    # Default to Azure/TRAPI for all OpenAI models (faster, more reliable)
-    def _should_use_azure():
-        # Explicit opt-out
-        if os.environ.get('USE_TRAPI', '').lower() == 'false':
-            return False
-        if os.environ.get('USE_DIRECT_AZURE', '').lower() == 'false':
-            return False
+    # ==========================================================================
+    # AZURE/TRAPI DIRECT ACCESS - Using shared modules
+    # ==========================================================================
 
-        # Normalize model name
-        model_lower = model_params.get('model_id', '').lower()
-        for prefix in ('openai/', 'azure/'):
-            if model_lower.startswith(prefix):
-                model_lower = model_lower[len(prefix):]
-                break
+    # Determine if we should use Azure/TRAPI
+    model_id = model_params.get('model_id', kwargs['model_name'])
+    model_lower = model_id.lower()
+    for prefix in ('openai/', 'azure/'):
+        if model_lower.startswith(prefix):
+            model_lower = model_lower[len(prefix):]
 
-        # Use TRAPI for all OpenAI models by default
-        is_openai_model = (
-            'gpt-' in model_lower or
-            model_lower.startswith('gpt-') or
-            model_lower.startswith('o1') or
-            model_lower.startswith('o3') or
-            model_lower.startswith('o4') or
-            'deepseek' in model_lower
-        )
-        return is_openai_model
+    is_openai_model = ('gpt-' in model_lower or model_lower.startswith('o1') or
+                       model_lower.startswith('o3') or model_lower.startswith('o4') or 'deepseek' in model_lower)
+    use_azure = SHARED_AZURE_AVAILABLE and is_openai_model and os.environ.get('USE_TRAPI', '').lower() != 'false'
 
-    # Use Azure direct for OpenAI models (faster, no proxy overhead)
-    if _should_use_azure():
+    if use_azure:
         try:
-            # Try hal_generalist_agent's AzureDirectModel
-            hal_agent_dir = Path(__file__).parent.parent / "hal_generalist_agent"
-            if str(hal_agent_dir) not in sys.path:
-                sys.path.insert(0, str(hal_agent_dir))
-            from azure_direct_model import AzureDirectModel
-            print(f"[INFO] Using AzureDirectModel for direct TRAPI access")
+            # Use the shared AzureDirectModel from shared/azure_direct_model.py
             model = AzureDirectModel(
-                model_id=model_params.get('model_id', kwargs['model_name']),
+                model_id=model_id,
                 temperature=model_params.get('temperature', 0.7),
-                num_retries=500,
-                timeout=1800,
-                **{k: v for k, v in kwargs.items() if k in ['reasoning_effort']}
+                reasoning_effort=kwargs.get('reasoning_effort'),
             )
+            print(f"[core_agent] Using shared AzureDirectModel for TRAPI access")
         except Exception as e:
-            print(f"[WARNING] Failed to use AzureDirectModel: {e}. Falling back to LiteLLMModel.")
-            model = LiteLLMModel(**model_params)
+            import traceback
+            print(f"[ERROR] Azure setup failed: {e}")
+            print(f"[ERROR] Traceback: {traceback.format_exc()}")
+            raise RuntimeError(f"AzureDirectModel initialization failed: {e}. Check Azure credentials and shared module setup.")
     else:
-        model = LiteLLMModel(**model_params)
+        # Should not happen - we always want TRAPI
+        raise RuntimeError(f"use_azure=False but TRAPI is required. Set USE_DIRECT_AZURE=true. model_id={model_id}")
     
     # Prepend hints to the task prompt if available
     prompt = task['prompt']

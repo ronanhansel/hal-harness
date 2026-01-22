@@ -593,6 +593,20 @@ class DockerRunner:
                     dirs_exist_ok=True,
                 )
 
+            # Copy shared module for Azure/TRAPI support
+            sibling_shared = agent_dir_path.parent / "shared"
+            if sibling_shared.exists():
+                shutil.copytree(
+                    sibling_shared,
+                    agent_root / "shared",
+                    dirs_exist_ok=True,
+                )
+
+            # Copy model_quirks.py for model parameter handling
+            model_quirks_file = agent_dir_path.parent / "model_quirks.py"
+            if model_quirks_file.exists():
+                shutil.copy2(model_quirks_file, agent_root / "model_quirks.py")
+
             # Write input and args files
             with open(temp_dir / "input.json", "w") as f:
                 json.dump({task_id: input_data}, f)
@@ -863,7 +877,7 @@ class DockerRunner:
             return {task_id: f"ERROR: {str(e)}"}
 
         finally:
-            # Cleanup
+            # Cleanup - CRITICAL: Must succeed to avoid filling up /tmp
             try:
                 # Copy directory to log_dir if specified
                 if self.log_dir:
@@ -885,8 +899,48 @@ class DockerRunner:
                         # Log but don't fail - some files may not copy but that's OK
                         verbose_logger.debug(f"Some files not copied for task {task_id}: {copy_errors}")
 
-                # Remove temp directory
-                shutil.rmtree(temp_dir, ignore_errors=True)
+                # Remove temp directory with retry logic
+                # IMPORTANT: Do NOT use ignore_errors=True as it silently fails and fills up /tmp
+                cleanup_success = False
+                for attempt in range(3):
+                    try:
+                        if temp_dir.exists():
+                            shutil.rmtree(temp_dir)
+                            cleanup_success = True
+                            verbose_logger.debug(f"Cleaned up temp directory for task {task_id}")
+                            break
+                        else:
+                            cleanup_success = True
+                            break
+                    except PermissionError as pe:
+                        verbose_logger.debug(f"Cleanup attempt {attempt+1}/3 failed for task {task_id}: {pe}")
+                        # Try to change permissions and retry
+                        try:
+                            import stat
+                            for root, dirs, files in os.walk(temp_dir):
+                                for d in dirs:
+                                    os.chmod(os.path.join(root, d), stat.S_IRWXU)
+                                for f in files:
+                                    os.chmod(os.path.join(root, f), stat.S_IRWXU)
+                        except Exception:
+                            pass
+                        time.sleep(0.5)
+                    except Exception as e:
+                        verbose_logger.debug(f"Cleanup attempt {attempt+1}/3 failed for task {task_id}: {e}")
+                        time.sleep(0.5)
+
+                if not cleanup_success and temp_dir.exists():
+                    # Last resort: try subprocess rm -rf
+                    try:
+                        subprocess.run(["rm", "-rf", str(temp_dir)], timeout=60, check=False)
+                        if not temp_dir.exists():
+                            cleanup_success = True
+                            verbose_logger.debug(f"Cleaned up temp directory via rm -rf for task {task_id}")
+                    except Exception as e:
+                        verbose_logger.debug(f"rm -rf cleanup failed for task {task_id}: {e}")
+
+                if not cleanup_success and temp_dir.exists():
+                    verbose_logger.warning(f"CRITICAL: Failed to cleanup temp directory {temp_dir} for task {task_id} - disk space may fill up!")
 
                 # Remove container
                 try:
@@ -901,6 +955,12 @@ class DockerRunner:
             except Exception as e:
                 error_msg = f"Warning: Failed to cleanup for task {task_id}: {e}"
                 verbose_logger.debug(error_msg)
+                # Even if overall cleanup fails, try to remove temp_dir as last resort
+                try:
+                    if temp_dir.exists():
+                        subprocess.run(["rm", "-rf", str(temp_dir)], timeout=60, check=False)
+                except Exception:
+                    pass
 
     def _create_runner_script(
         self,
