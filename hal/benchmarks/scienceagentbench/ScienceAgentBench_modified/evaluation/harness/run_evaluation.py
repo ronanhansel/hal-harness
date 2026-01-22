@@ -169,8 +169,8 @@ def run_instances(
     instance_image_ids = {x.instance_image_key for x in test_specs}
     
     existing_images = {
-        tag for i in client.images.list(all=True)
-        for tag in i.tags if tag in instance_image_ids
+        tag for tag in list_images(client)
+        if tag in instance_image_ids
     }
     if not force_rebuild and len(existing_images):
         print(f"Found {len(existing_images)} existing instance images. Will reuse them.")
