@@ -262,7 +262,15 @@ def list_images(client: docker.DockerClient):
     List all images from the Docker client.
     """
     # don't use this in multi-threaded context
-    return {tag for i in client.images.list(all=True) for tag in i.tags}
+    # Handle race condition where images may be deleted between list() and tag access
+    tags = set()
+    for i in client.images.list(all=True):
+        try:
+            tags.update(i.tags)
+        except docker.errors.ImageNotFound:
+            # Image was deleted between list() and accessing tags - skip it
+            continue
+    return tags
 
 
 def clean_images(
