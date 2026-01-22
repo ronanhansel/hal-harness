@@ -36,6 +36,11 @@ RETRYABLE_ERRORS = [
     "econnreset",
     "econnrefused",
     "etimedout",
+    # Authentication errors - can be transient (token refresh, etc.)
+    "401",
+    "unauthorized",
+    "invalid or expired token",
+    "authenticationerror",
 ]
 
 

@@ -102,10 +102,10 @@ def get_msal_token(scope: str = 'api://trapi/.default') -> Optional[str]:
             token_cache=cache
         )
 
-        # Get accounts and try to acquire token silently
+        # Try ALL accounts - different accounts may have tokens for different scopes
         accounts = app.get_accounts()
-        if accounts:
-            result = app.acquire_token_silent([scope], account=accounts[0])
+        for account in accounts:
+            result = app.acquire_token_silent([scope], account=account)
             if result and 'access_token' in result:
                 return result['access_token']
     except Exception as e:
@@ -184,26 +184,34 @@ class MSALTokenProvider:
         if not accounts:
             raise RuntimeError("No accounts found in MSAL cache. Run 'az login' first.")
 
-        # Try to acquire token silently (uses refresh token if access token expired)
-        result = app.acquire_token_silent([self.scope], account=accounts[0])
+        # Try to acquire token silently from ALL accounts (different accounts may have different scopes)
+        # This fixes the issue where accounts[0] doesn't have TRAPI tokens but another account does
+        last_error = None
+        for account in accounts:
+            result = app.acquire_token_silent([self.scope], account=account)
 
-        if result and 'access_token' in result:
-            # Save cache to persist any refreshed tokens
-            self._save_cache(cache)
+            if result and 'access_token' in result:
+                # Save cache to persist any refreshed tokens
+                self._save_cache(cache)
 
-            self._token_refresh_count += 1
-            self._last_token_time = time.time()
+                self._token_refresh_count += 1
+                self._last_token_time = time.time()
 
-            # Log occasional refresh stats
-            if self._token_refresh_count % 100 == 0:
-                print(f"[MSALTokenProvider] Token refresh count: {self._token_refresh_count}")
+                # Log occasional refresh stats (include which account worked)
+                if self._token_refresh_count % 100 == 0:
+                    print(f"[MSALTokenProvider] Token refresh count: {self._token_refresh_count} (account: {account.get('username', 'unknown')})")
 
-            return result['access_token']
+                return result['access_token']
+            else:
+                # Track error for reporting if all accounts fail
+                if result:
+                    last_error = f"{result.get('error', 'unknown')}: {result.get('error_description', '')}"
+                else:
+                    last_error = f"No token for account {account.get('username', 'unknown')}"
 
-        # Token acquisition failed
-        error = result.get('error', 'unknown') if result else 'no result'
-        error_desc = result.get('error_description', '') if result else ''
-        raise RuntimeError(f"Token acquisition failed: {error} - {error_desc}")
+        # All accounts failed
+        account_names = [a.get('username', 'unknown') for a in accounts]
+        raise RuntimeError(f"Token acquisition failed for all {len(accounts)} accounts ({', '.join(account_names)}). Last error: {last_error}")
 
 # Import smolagents Model base class
 try:
@@ -501,27 +509,58 @@ class AzureDirectModel(Model):
         if 'deepseek' in self.model_id.lower():
             request_params["extra_headers"] = {"extra-parameters": "pass-through"}
 
-        try:
-            # Call Azure OpenAI - Weave should autopatch this if enabled
-            response = self.client.chat.completions.create(**request_params)
-            content = response.choices[0].message.content or ""
+        # Retry logic for authentication errors
+        max_auth_retries = 3
+        last_error = None
 
-            # Strip thinking tags for deepseek
-            if 'deepseek' in self.model_id.lower():
-                content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
+        for attempt in range(max_auth_retries):
+            try:
+                # Call Azure OpenAI - Weave should autopatch this if enabled
+                response = self.client.chat.completions.create(**request_params)
+                content = response.choices[0].message.content or ""
 
-            # Track token counts (required by smolagents Model.get_token_counts())
-            if hasattr(response, 'usage') and response.usage:
-                self.last_input_token_count = response.usage.prompt_tokens
-                self.last_output_token_count = response.usage.completion_tokens
-            else:
-                self.last_input_token_count = None
-                self.last_output_token_count = None
+                # Strip thinking tags for deepseek
+                if 'deepseek' in self.model_id.lower():
+                    content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
 
-            return ChatMessage(role="assistant", content=content, raw=response)
-        except Exception as e:
-            print(f"[AzureDirectModel] Error calling {self.deployment_name}: {type(e).__name__}: {e}")
-            raise
+                # Track token counts (required by smolagents Model.get_token_counts())
+                if hasattr(response, 'usage') and response.usage:
+                    self.last_input_token_count = response.usage.prompt_tokens
+                    self.last_output_token_count = response.usage.completion_tokens
+                else:
+                    self.last_input_token_count = None
+                    self.last_output_token_count = None
+
+                return ChatMessage(role="assistant", content=content, raw=response)
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
+
+                # Check if it's an authentication error that might be fixed by token refresh
+                is_auth_error = any(x in error_str for x in ['401', 'unauthorized', 'invalid or expired token', 'authenticationerror'])
+
+                if is_auth_error and attempt < max_auth_retries - 1:
+                    print(f"[AzureDirectModel] Auth error (attempt {attempt + 1}/{max_auth_retries}), refreshing client: {type(e).__name__}")
+                    import time
+                    time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+
+                    # Recreate client to force token refresh
+                    try:
+                        self.client = create_trapi_client(
+                            max_retries=self.num_retries,
+                            timeout=self.timeout,
+                        )
+                        print(f"[AzureDirectModel] Client recreated successfully")
+                        continue  # Retry with new client
+                    except Exception as refresh_error:
+                        print(f"[AzureDirectModel] Failed to recreate client: {refresh_error}")
+                        # Fall through to raise original error
+
+                print(f"[AzureDirectModel] Error calling {self.deployment_name}: {type(e).__name__}: {e}")
+                raise
+
+        # Should not reach here, but just in case
+        raise last_error
 
     def generate(
         self,

@@ -687,10 +687,12 @@ class DockerRunner:
             volumes = {}
             azure_dir = os.path.expanduser("~/.azure")
             if os.path.isdir(azure_dir) and env_vars.get("USE_DIRECT_AZURE", "").lower() == "true":
-                volumes[azure_dir] = {"bind": "/root/.azure", "mode": "ro"}
+                # Mount read-write so MSAL can persist refreshed tokens
+                # MSAL handles concurrent access with file locks
+                volumes[azure_dir] = {"bind": "/root/.azure", "mode": "rw"}
                 # Set HOME=/root so SharedTokenCacheCredential finds the mounted Azure credentials
                 env_vars["HOME"] = "/root"
-                verbose_logger.debug(f"Mounting Azure credentials from {azure_dir}")
+                verbose_logger.debug(f"Mounting Azure credentials from {azure_dir} (rw for token refresh)")
                 # Remove proxy URLs so the agent uses direct Azure instead of LiteLLM proxy
                 for key in ("OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENAI_API_BASE_URL", "LITELLM_BASE_URL"):
                     env_vars.pop(key, None)
