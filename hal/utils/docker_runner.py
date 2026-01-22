@@ -25,7 +25,7 @@ DOCKER_IMAGE_NAME = "hal-agent-runner:latest"
 # Build-time choices for the prepared image. Bump TEMPLATE_VERSION when changing the recipe.
 # IMPORTANT: appworld requires Python >= 3.11 as of Jan 2026
 AGENT_ENV_PYTHON_VERSION = "3.11"  # Hardcoded to ensure Python 3.11 is always used
-AGENT_ENV_TEMPLATE_VERSION = "6"  # v6: + matplotlib, numpy, pandas, scipy, scikit-learn, seaborn
+AGENT_ENV_TEMPLATE_VERSION = "7"  # v7: use mamba instead of conda for faster env creation
 
 class DockerRunner:
     """Handles running agents in Docker containers for isolation"""
@@ -171,7 +171,7 @@ class DockerRunner:
                             "COPY requirements.txt /tmp/requirements.txt",
                             "RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main \\",
                             " && conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r \\",
-                            f" && conda create -y -n agent_env python={AGENT_ENV_PYTHON_VERSION} \\",
+                            f" && mamba create -y -n agent_env python={AGENT_ENV_PYTHON_VERSION} \\",
                             " && conda run -n agent_env python -m pip install -U pip \\",
                             " && conda run -n agent_env pip install -r /tmp/requirements.txt \\",
                             " && conda run -n agent_env pip install weave==0.51.41 'gql<4' wandb==0.17.9",
