@@ -48,6 +48,8 @@ class DockerRunner:
             or os.getenv("HAL_DOCKER_NETWORK")  # backwards-compat alias
             or None
         )
+        # Debug: Print network mode at init
+        print(f"[hal][docker] DockerRunner init: network_mode={self.network_mode}")
         self.dotenv_path: str = os.getenv("HAL_DOTENV_PATH") or ".env"
         
         # Initialize Docker client.

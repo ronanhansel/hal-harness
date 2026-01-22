@@ -342,6 +342,39 @@ def create_trapi_client(
     raise RuntimeError("No authentication method available. Ensure ~/.azure is mounted or AZURE_OPENAI_AD_TOKEN is set.")
 
 
+def _extract_rate_limit_wait_time(error_message: str) -> Optional[float]:
+    """
+    Extract wait time from rate limit error messages.
+
+    Examples:
+        "Try again in 41 seconds." -> 41.0
+        "Please retry after 30 seconds" -> 30.0
+        "Rate limit exceeded. Retry in 1 minute" -> 60.0
+
+    Returns:
+        Wait time in seconds, or None if not found
+    """
+    error_lower = error_message.lower()
+
+    # Pattern 1: "Try again in X seconds" or "retry after X seconds"
+    match = re.search(r'(?:try again in|retry after|retry in|wait)\s*(\d+)\s*seconds?', error_lower)
+    if match:
+        return float(match.group(1))
+
+    # Pattern 2: "X minutes"
+    match = re.search(r'(?:try again in|retry after|retry in|wait)\s*(\d+)\s*minutes?', error_lower)
+    if match:
+        return float(match.group(1)) * 60
+
+    # Pattern 3: Just extract any number followed by "seconds" near rate limit context
+    if '429' in error_message or 'rate' in error_lower or 'limit' in error_lower:
+        match = re.search(r'(\d+)\s*seconds?', error_lower)
+        if match:
+            return float(match.group(1))
+
+    return None
+
+
 class AzureDirectModel(Model):
     """
     Direct Azure OpenAI Model for smolagents.
@@ -509,11 +542,13 @@ class AzureDirectModel(Model):
         if 'deepseek' in self.model_id.lower():
             request_params["extra_headers"] = {"extra-parameters": "pass-through"}
 
-        # Retry logic for authentication errors
-        max_auth_retries = 3
+        # Retry configuration
+        max_retries = 3  # Max retries for both auth and rate limit errors
         last_error = None
+        rate_limit_retry_count = 0
+        auth_retry_count = 0
 
-        for attempt in range(max_auth_retries):
+        for attempt in range(max_retries * 2):  # Allow enough attempts for both error types
             try:
                 # Call Azure OpenAI - Weave should autopatch this if enabled
                 response = self.client.chat.completions.create(**request_params)
@@ -533,16 +568,43 @@ class AzureDirectModel(Model):
 
                 return ChatMessage(role="assistant", content=content, raw=response)
             except Exception as e:
+                import time
                 last_error = e
                 error_str = str(e).lower()
+                error_full = str(e)
+
+                # Check if it's a rate limit error (429)
+                is_rate_limit = any(x in error_str for x in [
+                    '429', 'rate limit', 'ratelimit', 'rate_limit',
+                    'token limit', 'too many requests', 'quota exceeded'
+                ])
+
+                if is_rate_limit and rate_limit_retry_count < max_retries:
+                    rate_limit_retry_count += 1
+
+                    # Extract wait time from error message
+                    wait_time = _extract_rate_limit_wait_time(error_full)
+                    if wait_time is None:
+                        # Default wait: exponential backoff starting at 30s
+                        wait_time = 30 * (2 ** (rate_limit_retry_count - 1))
+
+                    # Add a small buffer to the wait time
+                    wait_time = min(wait_time + 5, 300)  # Cap at 5 minutes
+
+                    print(f"[AzureDirectModel] Rate limit error (attempt {rate_limit_retry_count}/{max_retries})")
+                    print(f"[AzureDirectModel] Error details: {error_full}")
+                    print(f"[AzureDirectModel] Waiting {wait_time:.0f} seconds before retry...")
+
+                    time.sleep(wait_time)
+                    continue  # Retry
 
                 # Check if it's an authentication error that might be fixed by token refresh
                 is_auth_error = any(x in error_str for x in ['401', 'unauthorized', 'invalid or expired token', 'authenticationerror'])
 
-                if is_auth_error and attempt < max_auth_retries - 1:
-                    print(f"[AzureDirectModel] Auth error (attempt {attempt + 1}/{max_auth_retries}), refreshing client: {type(e).__name__}")
-                    import time
-                    time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+                if is_auth_error and auth_retry_count < max_retries:
+                    auth_retry_count += 1
+                    print(f"[AzureDirectModel] Auth error (attempt {auth_retry_count}/{max_retries}), refreshing client: {type(e).__name__}")
+                    time.sleep(2 ** auth_retry_count)  # Exponential backoff: 2s, 4s, 8s
 
                     # Recreate client to force token refresh
                     try:
@@ -556,6 +618,9 @@ class AzureDirectModel(Model):
                         print(f"[AzureDirectModel] Failed to recreate client: {refresh_error}")
                         # Fall through to raise original error
 
+                # Non-retryable error or retries exhausted
+                if is_rate_limit:
+                    print(f"[AzureDirectModel] Rate limit retries exhausted ({rate_limit_retry_count}/{max_retries})")
                 print(f"[AzureDirectModel] Error calling {self.deployment_name}: {type(e).__name__}: {e}")
                 raise
 
