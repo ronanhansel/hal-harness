@@ -266,17 +266,43 @@ def main(
 
     if openai_api_key == '':
         openai_api_key = os.getenv("OPENAI_API_KEY", '')
+    if openai_api_key.strip().lower() == "dummy":
+        openai_api_key = ""
+    use_direct_azure = os.getenv("USE_DIRECT_AZURE", "").lower() == "true"
+    if use_direct_azure:
+        openai_api_key = ""
     if azure_openai_endpoint == '':
         azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", '')
+        if azure_openai_endpoint == '':
+            azure_openai_endpoint = os.getenv("TRAPI_ENDPOINT", '') or os.getenv("AZURE_ENDPOINT", '')
     if azure_openai_key == '':
         azure_openai_key = os.getenv("AZURE_OPENAI_KEY", '')
     if azure_openai_api_version == '':
         azure_openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION", '')
+        if azure_openai_api_version == '':
+            azure_openai_api_version = os.getenv("TRAPI_API_VERSION", '') or os.getenv("AZURE_API_VERSION", '')
     if azure_openai_deployment_name == '':
         azure_openai_deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", '')
+        if azure_openai_deployment_name == '':
+            azure_openai_deployment_name = os.getenv("TRAPI_DEPLOYMENT_NAME", '')
+
+    msal_cache_path = os.path.expanduser("~/.azure/msal_token_cache.json")
+    msal_cache_available = os.path.isfile(msal_cache_path)
+    prefetched_ad_token = os.getenv("AZURE_OPENAI_AD_TOKEN", "")
 
     if openai_api_key == "":
-        if (
+        if use_direct_azure and (prefetched_ad_token or msal_cache_available):
+            if azure_openai_endpoint:
+                os.environ["AZURE_OPENAI_ENDPOINT"] = azure_openai_endpoint
+            if azure_openai_api_version:
+                os.environ["AZURE_OPENAI_API_VERSION"] = azure_openai_api_version
+            if azure_openai_deployment_name:
+                os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"] = azure_openai_deployment_name
+            if prefetched_ad_token:
+                os.environ["AZURE_OPENAI_AD_TOKEN"] = prefetched_ad_token
+            if not azure_openai_deployment_name:
+                print("WARNING: AZURE_OPENAI_DEPLOYMENT_NAME not set; visual judging may fail.")
+        elif (
             azure_openai_key == ""
             or azure_openai_endpoint == ""
             or azure_openai_api_version == ""

@@ -101,24 +101,10 @@ def build_image(
 
     # for setup_script_name, setup_script in setup_scripts.items():
     #     logger.info(f"[SETUP SCRIPT] {setup_script_name}:\n{setup_script}")
-    try:
-        # Write the setup scripts to the build directory
-        # for setup_script_name, setup_script in setup_scripts.items():
-        #     setup_script_path = build_dir / setup_script_name
-        #     with open(setup_script_path, "w") as f:
-        #         f.write(setup_script)
-        #     if setup_script_name not in dockerfile:
-        #         logger.warning(
-        #             f"Setup script {setup_script_name} may not be used in Dockerfile"
-        #         )
-        # Write the dockerfile to the build directory
-        dockerfile_path = build_dir / "Dockerfile"
-        with open(dockerfile_path, "w") as f:
-            f.write(dockerfile)
-
-        # Build the image
+    def _run_build(use_nocache: bool) -> None:
         logger.info(
             f"Building docker image {image_name} in {build_dir} with platform {platform}"
+            f"{' (nocache)' if use_nocache else ''}"
         )
         response = client.api.build(
             path=str(build_dir),
@@ -128,11 +114,8 @@ def build_image(
             forcerm=True,
             decode=True,
             platform=platform,
-            nocache=nocache,
+            nocache=use_nocache,
         )
-        # import pdb
-        # pdb.set_trace()
-        # Log the build process continuously
         buildlog = ""
         for chunk in response:
             if "stream" in chunk:
@@ -149,6 +132,37 @@ def build_image(
                     chunk["errorDetail"]["message"], buildlog
                 )
         logger.info("Image built successfully!")
+
+    try:
+        # Write the setup scripts to the build directory
+        # for setup_script_name, setup_script in setup_scripts.items():
+        #     setup_script_path = build_dir / setup_script_name
+        #     with open(setup_script_path, "w") as f:
+        #         f.write(setup_script)
+        #     if setup_script_name not in dockerfile:
+        #         logger.warning(
+        #             f"Setup script {setup_script_name} may not be used in Dockerfile"
+        #         )
+        # Write the dockerfile to the build directory
+        dockerfile_path = build_dir / "Dockerfile"
+        with open(dockerfile_path, "w") as f:
+            f.write(dockerfile)
+
+        try:
+            _run_build(nocache)
+        except docker.errors.BuildError as e:
+            err = str(e)
+            if (not nocache) and ("unable to find image" in err or "No such image" in err):
+                logger.warning(
+                    "Build cache references a missing image; retrying without cache."
+                )
+                try:
+                    remove_image(client, image_name, "quiet")
+                except Exception:
+                    pass
+                _run_build(True)
+            else:
+                raise
     except docker.errors.BuildError as e:
         logger.error(f"docker.errors.BuildError during {image_name}: {e}")
         raise BuildImageError(image_name, str(e), logger) from e
@@ -327,6 +341,54 @@ def build_container(
         logger.info(f"pred_program_path: {pred_program_path}")
 
         # create container
+        env_vars = {}
+        volumes = {
+            benchmark_path: {
+                'bind': '/testbed/benchmark',
+            },
+            pred_program_path: {
+                'bind': '/testbed/pred_programs',
+                'mode': 'rw'
+            },
+            os.path.abspath(test_spec.instance_path): {
+                'bind': '/testbed/instance_path',
+                'mode': 'rw'
+            },
+            os.path.abspath(os.path.join(os.path.dirname(__file__), '../../', 'compute_scores.py')): {
+                'bind': '/testbed/compute_scores.py',
+                'mode': 'rw'
+            },
+            os.path.abspath(os.path.join(os.path.dirname(__file__), '../../', 'gpt4_visual_judge.py')): {
+                'bind': '/testbed/gpt4_visual_judge.py',
+                'mode': 'rw'
+            },
+        }
+
+        use_direct_azure = os.getenv("USE_DIRECT_AZURE", "").lower() == "true"
+        if use_direct_azure:
+            env_vars["USE_DIRECT_AZURE"] = "true"
+            for key in (
+                "TRAPI_ENDPOINT",
+                "TRAPI_API_VERSION",
+                "TRAPI_SCOPE",
+                "TRAPI_DEPLOYMENT_NAME",
+                "AZURE_ENDPOINT",
+                "AZURE_API_VERSION",
+                "AZURE_SCOPE",
+                "AZURE_OPENAI_ENDPOINT",
+                "AZURE_OPENAI_API_VERSION",
+                "AZURE_OPENAI_DEPLOYMENT_NAME",
+            ):
+                value = os.getenv(key)
+                if value:
+                    env_vars[key] = value
+
+            azure_dir = os.path.expanduser("~/.azure")
+            msal_cache = os.path.join(azure_dir, "msal_token_cache.json")
+            if os.path.isdir(azure_dir) and os.path.isfile(msal_cache):
+                volumes[azure_dir] = {'bind': '/root/.azure', 'mode': 'rw'}
+                env_vars["HOME"] = "/root"
+
         container = client.containers.create(
             image=test_spec.instance_image_key,
             name=test_spec.get_instance_container_name(run_id),
@@ -334,27 +396,8 @@ def build_container(
             detach=True,
             command="tail -f /dev/null",
             platform=test_spec.platform,
-            volumes={
-                benchmark_path: {
-                    'bind': '/testbed/benchmark',
-                },
-                pred_program_path: {
-                    'bind': '/testbed/pred_programs',
-                    'mode': 'rw'
-                },
-                os.path.abspath(test_spec.instance_path): {
-                    'bind': '/testbed/instance_path',
-                    'mode': 'rw'
-                },
-                os.path.abspath(os.path.join(os.path.dirname(__file__), '../../', 'compute_scores.py')): {
-                    'bind': '/testbed/compute_scores.py',
-                    'mode': 'rw'
-                },
-                os.path.abspath(os.path.join(os.path.dirname(__file__), '../../', 'gpt4_visual_judge.py')): {
-                    'bind': '/testbed/gpt4_visual_judge.py',
-                    'mode': 'rw'
-                },
-            }
+            volumes=volumes,
+            environment=env_vars if env_vars else None,
         )
 
         logger.info(f"Container for {test_spec.instance_id} created: {container.id}")

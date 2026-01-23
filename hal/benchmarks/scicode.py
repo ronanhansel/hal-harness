@@ -5,7 +5,6 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Dict, Any, List
-from datasets import load_dataset
 import docker
 
 from .base_benchmark import BaseBenchmark
@@ -49,6 +48,13 @@ class SciCodeBenchmark(BaseBenchmark):
 
         # Default: load from HuggingFace
         print(f"[SciCode] Loading from HuggingFace (no custom path or path doesn't exist)")
+        try:
+            from datasets import load_dataset
+        except ImportError as exc:
+            raise ImportError(
+                "datasets package is required to load SciCode from HuggingFace. "
+                "Set SCICODE_DATASET_PATH to a local dataset to avoid this dependency."
+            ) from exc
         data = list(load_dataset("SciCode1/SciCode", split="test"))
         print(f"[SciCode] Loaded {len(data)} tasks from HuggingFace")
         return data

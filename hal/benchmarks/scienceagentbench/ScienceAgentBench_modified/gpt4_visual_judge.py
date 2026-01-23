@@ -8,16 +8,91 @@ import re
 from openai import OpenAI, AzureOpenAI
 
 
-# Select client based on environment variable
-if os.getenv("OPENAI_API_KEY"):
-    client = OpenAI()
-else:
-    client = AzureOpenAI(
-        api_key=os.getenv("AZURE_OPENAI_KEY"),
-        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+AZURE_CLI_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+AZURE_AUTHORITY = "https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47"
+
+
+def _get_msal_token_provider():
+    try:
+        import msal  # type: ignore
+    except Exception:
+        return None
+    cache_path = os.path.expanduser("~/.azure/msal_token_cache.json")
+    if not os.path.exists(cache_path):
+        return None
+    scope = os.getenv("TRAPI_SCOPE") or os.getenv("AZURE_SCOPE") or "https://cognitiveservices.azure.com/.default"
+
+    class _Provider:
+        def __call__(self) -> str:
+            cache = msal.SerializableTokenCache()
+            with open(cache_path, "r") as f:
+                cache.deserialize(f.read())
+            app = msal.PublicClientApplication(
+                AZURE_CLI_CLIENT_ID,
+                authority=AZURE_AUTHORITY,
+                token_cache=cache,
+            )
+            accounts = app.get_accounts()
+            if not accounts:
+                raise RuntimeError("No accounts found in MSAL cache.")
+            for account in accounts:
+                result = app.acquire_token_silent([scope], account=account, force_refresh=True)
+                if result and "access_token" in result:
+                    if cache.has_state_changed:
+                        try:
+                            with open(cache_path, "w") as f:
+                                f.write(cache.serialize())
+                        except Exception:
+                            pass
+                    return result["access_token"]
+            raise RuntimeError("No valid token found in MSAL cache.")
+
+    return _Provider()
+
+
+def _resolve_azure_settings():
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT") or os.getenv("TRAPI_ENDPOINT") or os.getenv("AZURE_ENDPOINT")
+    api_version = (
+        os.getenv("AZURE_OPENAI_API_VERSION")
+        or os.getenv("TRAPI_API_VERSION")
+        or os.getenv("AZURE_API_VERSION")
+        or "2024-12-01-preview"
     )
-    DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME") or os.getenv("TRAPI_DEPLOYMENT_NAME")
+    if not deployment:
+        deployment = "gpt-4o_2024-11-20"
+        print("WARNING: AZURE_OPENAI_DEPLOYMENT_NAME not set; defaulting to gpt-4o_2024-11-20.")
+    return endpoint, api_version, deployment
+
+
+openai_api_key = os.getenv("OPENAI_API_KEY", "")
+use_direct_azure = os.getenv("USE_DIRECT_AZURE", "").lower() == "true"
+if openai_api_key and openai_api_key.strip().lower() != "dummy" and not use_direct_azure:
+    client = OpenAI()
+    DEPLOYMENT_NAME = None
+else:
+    endpoint, api_version, deployment = _resolve_azure_settings()
+    ad_token = os.getenv("AZURE_OPENAI_AD_TOKEN", "")
+    token_provider = None if ad_token else _get_msal_token_provider()
+    if ad_token:
+        client = AzureOpenAI(
+            azure_endpoint=endpoint,
+            azure_ad_token=ad_token,
+            api_version=api_version,
+        )
+    elif token_provider:
+        client = AzureOpenAI(
+            azure_endpoint=endpoint,
+            azure_ad_token_provider=token_provider,
+            api_version=api_version,
+        )
+    else:
+        client = AzureOpenAI(
+            api_key=os.getenv("AZURE_OPENAI_KEY"),
+            api_version=api_version,
+            azure_endpoint=endpoint,
+        )
+    DEPLOYMENT_NAME = deployment
 
 PROMPT_ORIGIN = """You are an excellent judge at evaluating visualization plots between a model generated plot and the ground truth. You will be giving scores on how well it matches the ground truth plot.
                

@@ -167,10 +167,8 @@ class AgentRunner:
         
         # Get dataset and filter for remaining tasks if continuing
         dataset = self.benchmark.get_dataset()
-        if self.continue_run and not self.ignore_errors:
+        if self.continue_run:
             dataset = self.get_remaining_tasks(dataset)
-        elif self.continue_run and self.ignore_errors:
-            dataset = {}
             
         # Limit the number of tasks if max_tasks is specified
         if self.max_tasks and self.max_tasks > 0 and self.max_tasks < len(dataset):

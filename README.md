@@ -510,6 +510,11 @@ hal-eval --benchmark <benchmark_name> --agent_dir <agent_directory> --agent_func
 - **`--run_id <run_id>`**: Specify a run ID (useful for continuing runs)
 - **`--continue_run`**: Continue from a previous run (requires run_id)
 
+### Docker Throughput Tuning
+
+- **`HAL_DOCKER_REUSE_CONTAINERS=1`**: Reuse a fixed pool of Docker containers instead of starting one per task. This significantly reduces overhead but can allow state to persist between tasks.
+- **`HAL_DOCKER_POOL_SIZE=<number>`**: Number of pooled containers to keep warm (defaults to `--max_concurrent`).
+
 ### Example Evaluations
 
 1. **Running SWE-bench locally:**

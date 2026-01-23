@@ -12,6 +12,7 @@ import hashlib
 import shlex
 import urllib.parse
 import re
+from dataclasses import dataclass
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 from ..benchmarks.base_benchmark import BaseBenchmark
@@ -26,6 +27,11 @@ DOCKER_IMAGE_NAME = "hal-agent-runner:latest"
 # IMPORTANT: appworld requires Python >= 3.11 as of Jan 2026
 AGENT_ENV_PYTHON_VERSION = "3.11"  # Hardcoded to ensure Python 3.11 is always used
 AGENT_ENV_TEMPLATE_VERSION = "7"  # v7: use mamba instead of conda for faster env creation
+
+@dataclass
+class _ContainerLease:
+    container_id: str
+    host_root: Path
 
 class DockerRunner:
     """Handles running agents in Docker containers for isolation"""
@@ -43,6 +49,15 @@ class DockerRunner:
         self._toolchain_preflight_by_image: dict[str, bool] = {}
         self._azure_preflight_lock = asyncio.Lock()
         self._azure_preflight_by_image: dict[str, bool] = {}
+        self._reuse_containers = (os.getenv("HAL_DOCKER_REUSE_CONTAINERS") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        self._container_pool: Optional[asyncio.Queue[_ContainerLease]] = None
+        self._pool_lock = asyncio.Lock()
+        self._pool_spec: Optional[Dict[str, Any]] = None
+        self._pool_leases: list[_ContainerLease] = []
         # Optional Docker network mode override (e.g. "host") for environments where the
         # default bridge network cannot reach external endpoints.
         self.network_mode: str | None = (
@@ -121,6 +136,214 @@ class DockerRunner:
         ).encode("utf-8")
         return hashlib.sha256(req_bytes + b"\n" + base_image_id + b"\n" + recipe).hexdigest()[:16]
 
+    def _pool_size(self) -> int:
+        override = (os.getenv("HAL_DOCKER_POOL_SIZE") or "").strip()
+        if override:
+            try:
+                value = int(override)
+                if value > 0:
+                    return value
+            except ValueError:
+                pass
+        return max(1, self.max_concurrent)
+
+    def _collect_env_vars(self, env_override: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        env_vars: Dict[str, str] = {k: v for k, v in os.environ.items() if isinstance(v, str)}
+        try:
+            env_vars.update(
+                {
+                    k: v
+                    for k, v in dotenv_values(self.dotenv_path).items()
+                    if v is not None
+                }
+            )
+        except Exception:
+            pass
+        if env_override:
+            env_vars.update({str(k): str(v) for k, v in env_override.items() if v is not None})
+        env_vars.setdefault("BASH_ENV", "/opt/conda/etc/profile.d/conda.sh")
+        env_vars = self._sanitize_forwarded_env(env_vars)
+        env_vars["PATH"] = self._default_container_path()
+        self._maybe_warn_about_openai_base_url(env_vars)
+        return env_vars
+
+    def _resolve_extra_hosts(self) -> Optional[Dict[str, str]]:
+        extra_hosts: Optional[Dict[str, str]] = {"host.docker.internal": "host-gateway"}
+        disable_host_gateway = (os.getenv("HAL_DOCKER_DISABLE_HOST_GATEWAY") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if disable_host_gateway:
+            return None
+        return extra_hosts
+
+    def _configure_azure_mount(self, env_vars: Dict[str, str]) -> Dict[str, Dict[str, str]]:
+        volumes: Dict[str, Dict[str, str]] = {}
+        azure_dir = os.path.expanduser("~/.azure")
+        msal_cache = os.path.join(azure_dir, "msal_token_cache.json")
+        azure_creds_exist = os.path.isdir(azure_dir) and os.path.isfile(msal_cache)
+
+        # Auto-enable direct Azure if credentials exist (unless explicitly disabled)
+        use_direct_azure = env_vars.get("USE_DIRECT_AZURE", "").lower()
+        if use_direct_azure == "false":
+            verbose_logger.debug("Direct Azure disabled (USE_DIRECT_AZURE=false)")
+        elif use_direct_azure == "true" and not azure_creds_exist:
+            raise RuntimeError(
+                f"USE_DIRECT_AZURE=true but MSAL cache not found at {msal_cache}. "
+                "Aborting to avoid non-Azure fallback."
+            )
+        elif azure_creds_exist:
+            env_vars["USE_DIRECT_AZURE"] = "true"
+            verbose_logger.debug(f"Auto-enabled direct Azure (MSAL cache found at {msal_cache})")
+
+        if os.path.isdir(azure_dir) and env_vars.get("USE_DIRECT_AZURE", "").lower() == "true":
+            volumes[azure_dir] = {"bind": "/root/.azure", "mode": "rw"}
+            env_vars["HOME"] = "/root"
+            verbose_logger.debug(f"Mounting Azure credentials from {azure_dir} (rw for MSAL token refresh)")
+            for key in ("OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENAI_API_BASE_URL", "LITELLM_BASE_URL"):
+                env_vars.pop(key, None)
+            verbose_logger.debug("Azure MSAL mode enabled - tokens will auto-refresh for long-running tasks")
+
+        return volumes
+
+    def _seed_shared_workspace(self, host_root: Path, agent_dir_path: Path) -> None:
+        agent_root = host_root / "hal-harness" / "agents"
+        temp_agent_dir = agent_root / agent_dir_path.name
+        temp_agent_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(agent_dir_path, temp_agent_dir, dirs_exist_ok=True)
+
+        sibling_open_deep = agent_dir_path.parent / "open_deep_research"
+        if sibling_open_deep.exists():
+            shutil.copytree(
+                sibling_open_deep,
+                host_root / "hal-harness" / "open_deep_research",
+                dirs_exist_ok=True,
+            )
+
+        sibling_shared = agent_dir_path.parent / "shared"
+        if sibling_shared.exists():
+            shutil.copytree(
+                sibling_shared,
+                agent_root / "shared",
+                dirs_exist_ok=True,
+            )
+
+        model_quirks_file = agent_dir_path.parent / "model_quirks.py"
+        if model_quirks_file.exists():
+            shutil.copy2(model_quirks_file, agent_root / "model_quirks.py")
+
+    async def _start_pool_container(self, host_root: Path) -> _ContainerLease:
+        if not self._pool_spec:
+            raise RuntimeError("Container pool spec missing; cannot start pooled container.")
+        image_tag = self._pool_spec["image"]
+        env_vars = self._pool_spec["env_vars"]
+        volumes_base = self._pool_spec["volumes_base"]
+        extra_hosts = self._pool_spec["extra_hosts"]
+        tmpfs = self._pool_spec["tmpfs"]
+
+        container_id = f"agentpool--{uuid.uuid4()}"[:32].lower().replace("_", "-")
+        volumes = dict(volumes_base)
+        volumes[str(host_root)] = {"bind": "/workspace", "mode": "rw"}
+
+        container = self.docker_client.containers.run(
+            image=image_tag,
+            name=container_id,
+            detach=True,
+            command=["tail", "-f", "/dev/null"],
+            environment=env_vars,
+            network_mode=self.network_mode,
+            extra_hosts=extra_hosts,
+            volumes=volumes if volumes else None,
+            tmpfs=tmpfs,
+        )
+
+        self._active_containers.append(container_id)
+        await self._toolchain_preflight(container, image_tag)
+        await self._azure_token_preflight(container, image_tag, env_vars)
+        return _ContainerLease(container_id=container_id, host_root=host_root)
+
+    async def _ensure_container_pool(self, prepared_image: str, agent_dir: str) -> None:
+        if self._container_pool is not None:
+            return
+        async with self._pool_lock:
+            if self._container_pool is not None:
+                return
+            env_vars = self._collect_env_vars()
+            env_vars["HAL_HARNESS_ROOT"] = "/workspace/hal-harness"
+            env_vars["HAL_TASK_DIR"] = "/workspace/task"
+            env_vars["HAL_TASK_ENVIRONMENT_DIR"] = "/workspace/task/environment"
+            volumes_base = self._configure_azure_mount(env_vars)
+            extra_hosts = self._resolve_extra_hosts()
+            tmpfs = {"/tmp": "size=1G,mode=1777"}
+
+            self._pool_spec = {
+                "image": prepared_image,
+                "env_vars": env_vars,
+                "volumes_base": volumes_base,
+                "extra_hosts": extra_hosts,
+                "tmpfs": tmpfs,
+            }
+
+            pool = asyncio.Queue()
+            self._pool_leases = []
+            agent_dir_path = Path(agent_dir).resolve()
+
+            for _ in range(self._pool_size()):
+                host_root = Path(tempfile.mkdtemp(prefix="hal_docker_pool_"))
+                (host_root / "task").mkdir(parents=True, exist_ok=True)
+                self._seed_shared_workspace(host_root, agent_dir_path)
+                lease = await self._start_pool_container(host_root)
+                await pool.put(lease)
+                self._pool_leases.append(lease)
+
+            self._container_pool = pool
+
+    async def _acquire_pool_container(self) -> _ContainerLease:
+        if self._container_pool is None:
+            raise RuntimeError("Container pool not initialized.")
+        lease = await self._container_pool.get()
+        try:
+            container = self.docker_client.containers.get(lease.container_id)
+            container.reload()
+            if container.status != "running":
+                raise docker.errors.NotFound("container not running")
+            return lease
+        except Exception:
+            try:
+                if lease.container_id in self._active_containers:
+                    self._active_containers.remove(lease.container_id)
+            except Exception:
+                pass
+            lease = await self._start_pool_container(lease.host_root)
+            return lease
+
+    async def _release_pool_container(self, lease: _ContainerLease) -> None:
+        if self._container_pool is None:
+            return
+        await self._container_pool.put(lease)
+
+    async def _teardown_container_pool(self) -> None:
+        if self._container_pool is None:
+            return
+        leases = list(self._pool_leases)
+        self._container_pool = None
+        self._pool_leases = []
+        for lease in leases:
+            try:
+                container = self.docker_client.containers.get(lease.container_id)
+                container.remove(force=True)
+            except Exception:
+                pass
+            try:
+                if lease.container_id in self._active_containers:
+                    self._active_containers.remove(lease.container_id)
+            except Exception:
+                pass
+            try:
+                shutil.rmtree(lease.host_root, ignore_errors=True)
+            except Exception:
+                pass
     def _ensure_prepared_image(self, requirements_path: str) -> str:
         """
         Build a derived image with a ready-to-run `agent_env` conda env.
@@ -544,7 +767,9 @@ class DockerRunner:
                 agent_dir_path = Path(agent_dir).resolve()
                 requirements_path = str(agent_dir_path / "requirements.txt")
                 prepared_image = self._ensure_prepared_image(requirements_path)
-                if self._toolchain_preflight_by_image.get(prepared_image) is not True:
+                if self._reuse_containers:
+                    await self._ensure_container_pool(prepared_image, agent_dir)
+                elif self._toolchain_preflight_by_image.get(prepared_image) is not True:
                     preflight_container_id = f"agentpreflight--{uuid.uuid4()}"[:32].lower().replace("_", "-")
                     preflight_env = {
                         "PATH": self._default_container_path(),
@@ -597,6 +822,8 @@ class DockerRunner:
             return merged_results
 
         finally:
+            if self._container_pool is not None:
+                await self._teardown_container_pool()
             # Cleanup any remaining containers
             for container_id in self._active_containers.copy():  # Use copy to avoid mutation during iteration
                 try:
@@ -657,6 +884,17 @@ class DockerRunner:
                              timeout: int = 7200,
                              env_override: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
         """Process a single task in a Docker container with timeout"""
+        if self._reuse_containers:
+            return await self._run_single_task_reuse(
+                task_id=task_id,
+                input_data=input_data,
+                agent_function=agent_function,
+                agent_dir=agent_dir,
+                agent_args=agent_args,
+                run_id=run_id,
+                timeout=timeout,
+                env_override=env_override,
+            )
         # Create temporary directory for mounting into container
         temp_dir = Path(tempfile.mkdtemp())
         container_id = f"agentrun--{uuid.uuid4()}"[:32].lower().replace("_", "-")
@@ -736,75 +974,14 @@ class DockerRunner:
             prepared_image = self._ensure_prepared_image(requirements_path)
 
             # Pass through host env + .env + per-task overrides so Weave/W&B can upload traces.
-            env_vars: Dict[str, str] = {k: v for k, v in os.environ.items() if isinstance(v, str)}
-            try:
-                env_vars.update(
-                    {
-                        k: v
-                        for k, v in dotenv_values(self.dotenv_path).items()
-                        if v is not None
-                    }
-                )
-            except Exception:
-                pass
-            if env_override:
-                env_vars.update({str(k): str(v) for k, v in env_override.items() if v is not None})
-            # Make `conda activate ...` work in non-interactive bash sessions started by tools.
-            env_vars.setdefault("BASH_ENV", "/opt/conda/etc/profile.d/conda.sh")
-            env_vars = self._sanitize_forwarded_env(env_vars)
-            # Ensure common toolchains (R/pandoc/LaTeX/jupyter) and the prepared `agent_env` are discoverable via PATH.
-            # This avoids widespread "Rscript: not found" environmental barrier failures caused by PATH mismatches.
-            env_vars["PATH"] = self._default_container_path()
-            self._maybe_warn_about_openai_base_url(env_vars)
+            env_vars = self._collect_env_vars(env_override)
 
             # Provide a stable way for containers to reach host-local services (e.g. a local OpenAI/LiteLLM proxy).
             # On Linux, Docker requires an explicit host-gateway mapping.
-            extra_hosts: Optional[Dict[str, str]] = {"host.docker.internal": "host-gateway"}
-            disable_host_gateway = (os.getenv("HAL_DOCKER_DISABLE_HOST_GATEWAY") or "").strip().lower() in (
-                "1",
-                "true",
-                "yes",
-            )
-            if disable_host_gateway:
-                extra_hosts = None
+            extra_hosts = self._resolve_extra_hosts()
 
             # Mount Azure CLI credentials if available (for direct Azure access)
-            # AUTO-ENABLE: If Azure credentials exist and USE_DIRECT_AZURE is not explicitly disabled,
-            # enable direct Azure access for better reliability and automatic token refresh
-            volumes = {}
-            azure_dir = os.path.expanduser("~/.azure")
-            msal_cache = os.path.join(azure_dir, "msal_token_cache.json")
-            azure_creds_exist = os.path.isdir(azure_dir) and os.path.isfile(msal_cache)
-
-            # Auto-enable direct Azure if credentials exist (unless explicitly disabled)
-            use_direct_azure = env_vars.get("USE_DIRECT_AZURE", "").lower()
-            if use_direct_azure == "false":
-                # Explicitly disabled
-                verbose_logger.debug("Direct Azure disabled (USE_DIRECT_AZURE=false)")
-            elif use_direct_azure == "true" and not azure_creds_exist:
-                raise RuntimeError(
-                    f"USE_DIRECT_AZURE=true but MSAL cache not found at {msal_cache}. "
-                    "Aborting to avoid non-Azure fallback."
-                )
-            elif azure_creds_exist:
-                # Auto-enable if credentials exist
-                env_vars["USE_DIRECT_AZURE"] = "true"
-                verbose_logger.debug(f"Auto-enabled direct Azure (MSAL cache found at {msal_cache})")
-
-            if os.path.isdir(azure_dir) and env_vars.get("USE_DIRECT_AZURE", "").lower() == "true":
-                # Mount read-write so MSAL can persist refreshed tokens
-                # MSAL handles concurrent access with file locks
-                # This is CRITICAL for long-running containers (3-4+ hours) that need token refresh
-                volumes[azure_dir] = {"bind": "/root/.azure", "mode": "rw"}
-                # Set HOME=/root so SharedTokenCacheCredential finds the mounted Azure credentials
-                env_vars["HOME"] = "/root"
-                verbose_logger.debug(f"Mounting Azure credentials from {azure_dir} (rw for MSAL token refresh)")
-                # Remove proxy URLs so the agent uses direct Azure instead of LiteLLM proxy
-                for key in ("OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENAI_API_BASE_URL", "LITELLM_BASE_URL"):
-                    env_vars.pop(key, None)
-                # NOTE: We do NOT pre-fetch tokens because they expire after ~1 hour
-                # Agents MUST use MSAL token provider which refreshes tokens automatically
-                verbose_logger.debug("Azure MSAL mode enabled - tokens will auto-refresh for long-running tasks")
+            volumes = self._configure_azure_mount(env_vars)
 
             # Add tmpfs mount for /tmp to fix Azure CLI issues in container
             tmpfs = {"/tmp": "size=1G,mode=1777"}
@@ -1061,6 +1238,147 @@ class DockerRunner:
                 except Exception:
                     pass
 
+    async def _run_single_task_reuse(self,
+                             task_id: str,
+                             input_data: Any,
+                             agent_function: str,
+                             agent_dir: str,
+                             agent_args: Dict[str, Any],
+                             run_id: str,
+                             timeout: int = 7200,
+                             env_override: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
+        """Process a single task using a pooled Docker container"""
+        lease = await self._acquire_pool_container()
+        container_id = lease.container_id
+        host_root = lease.host_root
+        task_root = host_root / "task"
+        result = None
+
+        try:
+            if task_root.exists():
+                shutil.rmtree(task_root)
+            task_root.mkdir(parents=True, exist_ok=True)
+
+            agent_dir_path = Path(agent_dir).resolve()
+
+            with open(task_root / "input.json", "w") as f:
+                json.dump({task_id: input_data}, f)
+            with open(task_root / "agent_args.json", "w") as f:
+                json.dump(agent_args, f)
+
+            if isinstance(input_data, dict) and 'files' in input_data:
+                for dest_path, src_path in input_data['files'].items():
+                    dest_path = dest_path.replace('/root/', '').lstrip('/')
+                    dest_full_path = task_root / dest_path
+                    dest_full_path.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        if os.path.isdir(src_path):
+                            shutil.copytree(src_path, dest_full_path, dirs_exist_ok=True)
+                        else:
+                            shutil.copy2(src_path, dest_full_path)
+                    except Exception as e:
+                        verbose_logger.debug(f"Warning: Failed to copy task file {src_path} to {dest_full_path}: {e}")
+
+            weave_project = self._weave_project_for_run(run_id)
+            trace_filename = f"{run_id}_UPLOAD.json"
+            script = self._create_runner_script(
+                agent_function=agent_function,
+                task_id=task_id,
+                run_id=run_id,
+                agent_name=agent_dir_path.name,
+                weave_project=weave_project,
+                weave_op_name=task_id,
+                trace_filename=trace_filename,
+            )
+            script_path = task_root / "run_agent.py"
+            with open(script_path, "w") as f:
+                f.write(script)
+
+            if self.benchmark and self.benchmark.setup_script:
+                setup_script_src = Path(self.benchmark.setup_script)
+                if setup_script_src.exists():
+                    setup_dest = task_root / "setup_script.sh"
+                    shutil.copy2(setup_script_src, setup_dest)
+                    proc = await asyncio.create_subprocess_exec(
+                        "docker", "exec", container_id, "bash", "/workspace/task/setup_script.sh",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, stderr = await proc.communicate()
+                    if self.verbose and stdout:
+                        verbose_logger.debug(f"Container {container_id}: {stdout.decode()}")
+                    if stderr:
+                        verbose_logger.debug(f"Container {container_id}: {stderr.decode()}")
+
+            env_prefix = ""
+            if env_override:
+                parts: List[str] = []
+                for k, v in env_override.items():
+                    if v is None:
+                        continue
+                    parts.append(f"{shlex.quote(str(k))}={shlex.quote(str(v))}")
+                if parts:
+                    env_prefix = " ".join(parts) + " "
+
+            start_time = time.time()
+            proc = await asyncio.create_subprocess_exec(
+                "docker",
+                "exec",
+                container_id,
+                "bash",
+                "-c",
+                f"{env_prefix}cd /workspace/task && /opt/conda/bin/conda run -n agent_env python run_agent.py",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            if stdout:
+                verbose_logger.debug(f"Container {container_id}: {stdout.decode()}")
+            if stderr:
+                verbose_logger.debug(f"Container {container_id}: {stderr.decode()}")
+
+            while time.time() - start_time < timeout:
+                output_path = task_root / "output.json"
+                if output_path.exists():
+                    with open(output_path) as f:
+                        result = json.load(f)
+                    break
+                await asyncio.sleep(5)
+
+            if result is None:
+                verbose_logger.debug(f"Task {task_id} timed out after {timeout} seconds")
+                return {task_id: f"TIMEOUT after {timeout} seconds"}
+
+            return result
+
+        except Exception as e:
+            error_msg = f"Error processing task {task_id}: {e}"
+            verbose_logger.debug(error_msg)
+            return {task_id: f"ERROR: {str(e)}"}
+
+        finally:
+            try:
+                if self.log_dir:
+                    task_log_dir = os.path.join(self.log_dir, task_id)
+                    def ignore_missing(directory, files):
+                        ignored = []
+                        for f in files:
+                            path = os.path.join(directory, f)
+                            if not os.path.exists(path):
+                                ignored.append(f)
+                        return ignored
+                    try:
+                        shutil.copytree(task_root, task_log_dir, dirs_exist_ok=True,
+                                       ignore=ignore_missing, ignore_dangling_symlinks=True)
+                    except shutil.Error as copy_errors:
+                        verbose_logger.debug(f"Some files not copied for task {task_id}: {copy_errors}")
+
+                if task_root.exists():
+                    shutil.rmtree(task_root)
+            except Exception as e:
+                verbose_logger.debug(f"Warning: Failed to cleanup pooled task root for task {task_id}: {e}")
+            await self._release_pool_container(lease)
+
     def _create_runner_script(
         self,
         agent_function: str,
@@ -1179,8 +1497,8 @@ try:
     else:
         weave_enabled = False
     
-    # Make hal-harness + agent modules importable regardless of current working directory.
-    hal_harness_root = "/workspace/hal-harness"
+    task_root = os.getenv("HAL_TASK_DIR", "/workspace")
+    hal_harness_root = os.getenv("HAL_HARNESS_ROOT", os.path.join(task_root, "hal-harness"))
     agent_root = os.path.join(hal_harness_root, "agents", "{agent_name}")
     for path in (hal_harness_root, agent_root):
         if path and path not in sys.path:
@@ -1189,17 +1507,18 @@ try:
     # CoreBench capsules are staged under /workspace/environment (mirrors /root/environment in the
     # original harness). Run the agent from there so relative paths in tasks resolve correctly.
     try:
-        if os.path.isdir("/workspace/environment"):
-            os.chdir("/workspace/environment")
+        env_root = os.getenv("HAL_TASK_ENVIRONMENT_DIR", os.path.join(task_root, "environment"))
+        if os.path.isdir(env_root):
+            os.chdir(env_root)
     except Exception:
         pass
 
     # Load input data
-    with open("/workspace/input.json", "r") as f:
+    with open(os.path.join(task_root, "input.json"), "r") as f:
         input_data = json.load(f)
     
     # Load agent arguments
-    with open("/workspace/agent_args.json", "r") as f:
+    with open(os.path.join(task_root, "agent_args.json"), "r") as f:
         agent_args = json.load(f)
 
     _network_preflight()
@@ -1207,7 +1526,7 @@ try:
     # Import agent module
     spec = importlib.util.spec_from_file_location(
         "{module_name}",
-        os.path.join("/workspace", "hal-harness", "agents", "{agent_name}", "{module_name}.py")
+        os.path.join(agent_root, "{module_name}.py")
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -1245,7 +1564,7 @@ try:
         result = agent_fn(input_data, **agent_args)
     
     # Save output
-    with open("/workspace/output.json", "w") as f:
+    with open(os.path.join(task_root, "output.json"), "w") as f:
         json.dump(result, f)
 
 except Exception as e:
