@@ -41,6 +41,8 @@ class DockerRunner:
         self._prepared_image_by_requirements: dict[str, str] = {}
         self._toolchain_preflight_lock = asyncio.Lock()
         self._toolchain_preflight_by_image: dict[str, bool] = {}
+        self._azure_preflight_lock = asyncio.Lock()
+        self._azure_preflight_by_image: dict[str, bool] = {}
         # Optional Docker network mode override (e.g. "host") for environments where the
         # default bridge network cannot reach external endpoints.
         self.network_mode: str | None = (
@@ -313,6 +315,87 @@ class DockerRunner:
                     "- Rebuild base image: `cd hal-harness && docker build -t hal-agent-runner:latest -f hal/utils/docker/Dockerfile .`\n"
                     "- Then force rebuild prepared images once: `HAL_DOCKER_FORCE_REBUILD=1`\n"
                     f"- Preflight error: {e}"
+                ) from e
+
+    async def _azure_token_preflight(
+        self,
+        container: "docker.models.containers.Container",
+        image_tag: str,
+        env_vars: Dict[str, str],
+    ) -> None:
+        """
+        Verify MSAL refresh token works inside the container when direct Azure is enabled.
+        Runs at most once per prepared image tag per process.
+        """
+        if env_vars.get("USE_DIRECT_AZURE", "").lower() != "true":
+            return
+
+        async with self._azure_preflight_lock:
+            cached = self._azure_preflight_by_image.get(image_tag)
+            if cached is True:
+                return
+            if cached is False:
+                raise RuntimeError(
+                    "Azure token preflight failed previously for this image; "
+                    "fix MSAL cache/auth before retrying."
+                )
+
+            scope = env_vars.get("TRAPI_SCOPE", "api://trapi/.default")
+            cmd = [
+                "bash",
+                "-lc",
+                "set -e; "
+                "echo '[hal][azure] verifying MSAL refresh token...'; "
+                "conda run -n agent_env python - <<'PY'\n"
+                "import msal, os\n"
+                "cache_path = os.path.expanduser('~/.azure/msal_token_cache.json')\n"
+                "if not os.path.exists(cache_path):\n"
+                "    raise SystemExit(f'MSAL cache not found at {cache_path}')\n"
+                "cache = msal.SerializableTokenCache()\n"
+                "cache.deserialize(open(cache_path).read())\n"
+                "app = msal.PublicClientApplication(\n"
+                "    '04b07795-8ddb-461a-bbee-02f9e1bf7b46',\n"
+                "    authority='https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47',\n"
+                "    token_cache=cache,\n"
+                ")\n"
+                "accounts = app.get_accounts()\n"
+                "if not accounts:\n"
+                "    raise SystemExit('No accounts found in MSAL cache')\n"
+                f"scope = '{scope}'\n"
+                "last_error = None\n"
+                "ok = False\n"
+                "for idx, account in enumerate(accounts):\n"
+                "    username = account.get('username', 'unknown')\n"
+                "    result = app.acquire_token_silent([scope], account=account, force_refresh=True)\n"
+                "    if result and 'access_token' in result:\n"
+                "        if cache.has_state_changed:\n"
+                "            with open(cache_path, 'w') as f:\n"
+                "                f.write(cache.serialize())\n"
+                "        print(f'[hal][azure] refresh ok account {idx}: {username}')\n"
+                "        ok = True\n"
+                "        break\n"
+                "    if result:\n"
+                "        last_error = result.get('error_description', 'unknown')\n"
+                "    else:\n"
+                "        last_error = f'No token for account {username}'\n"
+                "if not ok:\n"
+                "    raise SystemExit(f'Token refresh failed for all accounts. Last error: {last_error}')\n"
+                "print('[hal][azure] refresh token usable')\n"
+                "PY\n",
+            ]
+            try:
+                result = container.exec_run(cmd)
+                out = (result.output or b"").decode(errors="replace")
+                verbose_logger.debug("[hal][azure] preflight for image=%s exit=%s\n%s", image_tag, result.exit_code, out)
+                if result.exit_code != 0:
+                    raise RuntimeError(out.strip() or f"azure preflight failed (exit {result.exit_code})")
+                self._azure_preflight_by_image[image_tag] = True
+            except Exception as e:
+                self._azure_preflight_by_image[image_tag] = False
+                raise RuntimeError(
+                    "Azure MSAL refresh token preflight failed inside the container. "
+                    "Ensure ~/.azure/msal_token_cache.json is mounted RW and contains a TRAPI refresh token."
+                    f"\n- Preflight error: {e}"
                 ) from e
 
     def _sanitize_forwarded_env(self, env: Dict[str, str]) -> Dict[str, str]:
@@ -698,6 +781,11 @@ class DockerRunner:
             if use_direct_azure == "false":
                 # Explicitly disabled
                 verbose_logger.debug("Direct Azure disabled (USE_DIRECT_AZURE=false)")
+            elif use_direct_azure == "true" and not azure_creds_exist:
+                raise RuntimeError(
+                    f"USE_DIRECT_AZURE=true but MSAL cache not found at {msal_cache}. "
+                    "Aborting to avoid non-Azure fallback."
+                )
             elif azure_creds_exist:
                 # Auto-enable if credentials exist
                 env_vars["USE_DIRECT_AZURE"] = "true"
@@ -755,6 +843,7 @@ class DockerRunner:
             # Fail fast if the prepared image is missing baseline tooling (Rscript/pandoc/TeX).
             # This avoids running agent logic that will inevitably error with "Rscript: not found".
             await self._toolchain_preflight(container, prepared_image)
+            await self._azure_token_preflight(container, prepared_image, env_vars)
             
             # Using asyncio subprocess instead of subprocess.run
             # copy all the contents of temp dir into container

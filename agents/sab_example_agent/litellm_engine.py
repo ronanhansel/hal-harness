@@ -270,14 +270,23 @@ class LiteLlmEngine:
             print(f"[LiteLlmEngine] Azure client initialized: {self.llm_engine_name} -> {self.deployment_name}")
         except Exception as e:
             print(f"[LiteLlmEngine] Failed to initialize Azure client: {e}")
+            if os.environ.get('USE_DIRECT_AZURE', '').lower() == 'true':
+                raise RuntimeError(
+                    "Direct Azure is enabled but Azure client initialization failed. "
+                    "Aborting to avoid LiteLLM fallback."
+                ) from e
             print("[LiteLlmEngine] Falling back to LiteLLM")
 
     def respond(self, messages, temperature, top_p, max_tokens):
         """Generate a response from the model."""
         if self._use_azure and self.client:
             return self._respond_azure(messages, temperature, top_p, max_tokens)
-        else:
-            return self._respond_litellm(messages, temperature, top_p, max_tokens)
+        if os.environ.get('USE_DIRECT_AZURE', '').lower() == 'true':
+            raise RuntimeError(
+                "Direct Azure is enabled but Azure client was not initialized. "
+                "Refusing to fall back to LiteLLM."
+            )
+        return self._respond_litellm(messages, temperature, top_p, max_tokens)
 
     def _respond_azure(self, messages, temperature, top_p, max_tokens):
         """Generate response using Azure OpenAI SDK."""

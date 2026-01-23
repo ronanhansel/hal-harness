@@ -236,26 +236,38 @@ class MSALTokenProvider:
         if not accounts:
             raise RuntimeError("No accounts found in MSAL cache. Run 'az login' first.")
 
-        # Try to acquire token silently (uses refresh token if access token expired)
-        result = app.acquire_token_silent([self.scope], account=accounts[0])
+        # Try to acquire token silently from ALL accounts.
+        last_error = None
+        for idx, account in enumerate(accounts):
+            username = account.get('username', 'unknown')
+            result = app.acquire_token_silent([self.scope], account=account)
 
-        if result and 'access_token' in result:
-            # Save cache to persist any refreshed tokens
-            self._save_cache(cache)
+            if result and 'access_token' in result:
+                # Save cache to persist any refreshed tokens
+                self._save_cache(cache)
 
-            self._token_refresh_count += 1
-            self._last_token_time = time.time()
+                self._token_refresh_count += 1
+                self._last_token_time = time.time()
 
-            # Log occasional refresh stats
-            if self._token_refresh_count % 100 == 0:
-                print(f"[MSALTokenProvider] Token refresh count: {self._token_refresh_count}")
+                # Log occasional refresh stats
+                if self._token_refresh_count == 1:
+                    print(f"[MSALTokenProvider] Using account {idx}: {username} (has valid token)")
+                elif self._token_refresh_count % 100 == 0:
+                    print(f"[MSALTokenProvider] Token refresh count: {self._token_refresh_count}")
 
-            return result['access_token']
+                return result['access_token']
 
-        # Token acquisition failed
-        error = result.get('error', 'unknown') if result else 'no result'
-        error_desc = result.get('error_description', '') if result else ''
-        raise RuntimeError(f"Token acquisition failed: {error} - {error_desc}")
+            if result:
+                last_error = f"{result.get('error', 'unknown')}: {result.get('error_description', '')}"
+            else:
+                last_error = f"No token for account {username}"
+
+        # Token acquisition failed for all accounts
+        account_names = [a.get('username', 'unknown') for a in accounts]
+        raise RuntimeError(
+            f"Token acquisition failed for all {len(accounts)} accounts ({', '.join(account_names)}). "
+            f"Last error: {last_error}"
+        )
 
 
 def _get_msal_token_provider(scope: str) -> Optional[Callable[[], str]]:
@@ -323,9 +335,10 @@ def get_trapi_client(
     if timeout is None:
         timeout = float(os.environ.get('TRAPI_TIMEOUT', 1800))
 
-    # Method 1: MSAL token provider (REQUIRED - supports automatic token refresh)
+    # Method 1: MSAL token provider (REQUIRED for direct Azure mode)
     # MSAL can refresh tokens automatically using the refresh token in the cache
     # This is critical for long-running benchmarks (3-4+ hours)
+    direct_required = os.environ.get("USE_DIRECT_AZURE", "").lower() == "true"
     msal_provider = _get_msal_token_provider(scope)
     if msal_provider:
         print(f"[azure_utils] Using MSAL token provider (auto-refresh enabled for long-running tasks)")
@@ -336,6 +349,11 @@ def get_trapi_client(
             api_version=api_version,
             max_retries=max_retries,
             timeout=timeout,
+        )
+    if direct_required:
+        raise RuntimeError(
+            "Direct Azure is enabled but MSAL cache is unavailable. "
+            "Ensure ~/.azure/msal_token_cache.json is mounted into the container."
         )
 
     # Method 2: Azure Identity credential chain (fallback - also supports token refresh)
@@ -396,8 +414,9 @@ def get_azure_client(
     if timeout is None:
         timeout = float(os.environ.get('AZURE_TIMEOUT', 1800))
 
-    # Method 1: MSAL token provider (REQUIRED - supports automatic token refresh)
+    # Method 1: MSAL token provider (REQUIRED for direct Azure mode)
     # Critical for long-running benchmarks (3-4+ hours)
+    direct_required = os.environ.get("USE_DIRECT_AZURE", "").lower() == "true"
     msal_provider = _get_msal_token_provider(scope)
     if msal_provider:
         print(f"[azure_utils] Using MSAL token provider for Azure client (auto-refresh enabled)")
@@ -407,6 +426,11 @@ def get_azure_client(
             api_version=api_version,
             max_retries=max_retries,
             timeout=timeout,
+        )
+    if direct_required:
+        raise RuntimeError(
+            "Direct Azure is enabled but MSAL cache is unavailable. "
+            "Ensure ~/.azure/msal_token_cache.json is mounted into the container."
         )
 
     # Method 2: Azure Identity (fallback - also supports token refresh)

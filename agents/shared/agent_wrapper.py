@@ -152,7 +152,10 @@ def create_model_for_agent(
                 from azure_direct_model import AzureDirectModel
                 return AzureDirectModel(**model_params)
             except ImportError:
-                print("[WARNING] AzureDirectModel not available, falling back to LiteLLMModel")
+                raise RuntimeError(
+                    "Direct Azure is enabled but AzureDirectModel could not be imported. "
+                    "Install dependencies or fix agent packaging."
+                )
 
     # Use LiteLLMModel (default)
     try:

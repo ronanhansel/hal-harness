@@ -296,9 +296,10 @@ def create_trapi_client(
     if timeout is None:
         timeout = float(os.environ.get('TRAPI_TIMEOUT', 1800))
 
-    # Method 1: MSAL token provider (REQUIRED - supports automatic token refresh)
+    # Method 1: MSAL token provider (REQUIRED for direct Azure mode)
     # This dynamically refreshes tokens using the mounted ~/.azure cache
     # Critical for long-running benchmarks (3-4+ hours)
+    direct_required = os.environ.get("USE_DIRECT_AZURE", "").lower() == "true"
     if MSAL_AVAILABLE:
         cache_path = os.path.expanduser('~/.azure/msal_token_cache.json')
         if os.path.exists(cache_path):
@@ -317,6 +318,11 @@ def create_trapi_client(
                     )
             except Exception as e:
                 print(f"[AzureDirectModel] MSAL token provider failed: {e}")
+    if direct_required:
+        raise RuntimeError(
+            "Direct Azure is enabled but MSAL cache is unavailable. "
+            "Ensure ~/.azure/msal_token_cache.json is mounted into the container."
+        )
 
     # Method 2: Azure Identity credential chain (fallback - also supports token refresh)
     if AZURE_IDENTITY_AVAILABLE:
