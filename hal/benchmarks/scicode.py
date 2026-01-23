@@ -111,28 +111,35 @@ class SciCodeBenchmark(BaseBenchmark):
                             for line in test_lst[idx].split("\n"):
                                 f.write(line + "\n")
         
+        image_name = os.environ.get("SCICODE_EVAL_IMAGE", "python:3.11")
+        skip_install = os.environ.get("SCICODE_EVAL_SKIP_INSTALL", "0").lower() in {"1", "true", "yes"}
+
         # Launch a Docker container that mounts self.benchmark_dir at /app and host_tmp_dir at /app/tmp_eval.
         client = docker.from_env()
         container = client.containers.run(
-            "python:3.11",
+            image_name,
             command="tail -f /dev/null",
             volumes={
                 str(Path(self.benchmark_dir).resolve()): {"bind": "/app", "mode": "rw"},
                 str(host_tmp_dir.resolve()): {"bind": "/app/tmp_eval", "mode": "rw"}
             },
             working_dir="/app",
+            environment={"PYTHONPATH": "/app/src"},
             detach=True,
         )
         
         try:
-            # Install required dependencies inside the container.
-            print("Installing dependencies inside the container...")
-            install_result = container.exec_run("pip install -e .", stream=True, demux=True)
-            for stdout, stderr in install_result.output:
-                if stdout:
-                    print(stdout.decode(), end='')
-                if stderr:
-                    print(stderr.decode(), end='')
+            if skip_install:
+                print("Skipping pip install inside container (SCICODE_EVAL_SKIP_INSTALL=1).")
+            else:
+                # Install required dependencies inside the container.
+                print("Installing dependencies inside the container...")
+                install_result = container.exec_run("pip install -e .", stream=True, demux=True)
+                for stdout, stderr in install_result.output:
+                    if stdout:
+                        print(stdout.decode(), end='')
+                    if stderr:
+                        print(stderr.decode(), end='')
 
             # Helper function to execute a Python script inside the container.            
             def run_script(script_path: Path) -> int:

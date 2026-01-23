@@ -60,6 +60,26 @@ class DockerRunner:
             self._task_venv = True
         else:
             self._task_venv = task_venv_setting.strip().lower() in ("1", "true", "yes")
+        worker_setting = os.getenv("HAL_DOCKER_WORKER_MODE")
+        if worker_setting is None or worker_setting.strip() == "":
+            self._worker_mode = True
+        else:
+            self._worker_mode = worker_setting.strip().lower() in ("1", "true", "yes")
+        metrics_setting = os.getenv("HAL_DOCKER_WORKER_METRICS")
+        if metrics_setting is None or metrics_setting.strip() == "":
+            self._worker_metrics = False
+        else:
+            self._worker_metrics = metrics_setting.strip().lower() in ("1", "true", "yes")
+        verbose_setting = os.getenv("HAL_DOCKER_WORKER_VERBOSE")
+        if verbose_setting is None or verbose_setting.strip() == "":
+            self._worker_verbose = True
+        else:
+            self._worker_verbose = verbose_setting.strip().lower() in ("1", "true", "yes")
+        status_setting = os.getenv("HAL_DOCKER_WORKER_STATUS_LOGS")
+        if status_setting is None or status_setting.strip() == "":
+            self._worker_status_logs = False
+        else:
+            self._worker_status_logs = status_setting.strip().lower() in ("1", "true", "yes")
         self._container_pool: Optional[asyncio.Queue[_ContainerLease]] = None
         self._pool_lock = asyncio.Lock()
         self._pool_spec: Optional[Dict[str, Any]] = None
@@ -162,6 +182,269 @@ class DockerRunner:
             if parent.name == "hal-harness":
                 return parent.parent / ".tmp"
         return Path.cwd() / ".tmp"
+
+    def _worker_script_path(self, host_root: Path) -> Path:
+        return host_root / "hal_worker.py"
+
+    def _queue_dir(self, host_root: Path) -> Path:
+        return host_root / "queue"
+
+    def _staging_root(self, host_root: Path) -> Path:
+        return host_root / "staging"
+
+    def _create_worker_script(self) -> str:
+        return textwrap.dedent(
+            '''
+            import json
+            import os
+            import shlex
+            import shutil
+            import subprocess
+            import time
+            import traceback
+            from pathlib import Path
+
+            QUEUE_DIR = os.getenv("HAL_TASK_QUEUE_DIR", "/workspace/queue")
+            AGENT_PYTHON = os.getenv("HAL_AGENT_PYTHON", "/opt/conda/envs/agent_env/bin/python")
+            VENV_PATH = os.getenv("HAL_TASK_VENV_PATH", "/tmp/hal_task_venv")
+            USE_VENV = (os.getenv("HAL_DOCKER_TASK_VENV") or "1").strip().lower() in ("1", "true", "yes")
+
+            def _tail(text: str, limit: int = 4000) -> str:
+                if not text:
+                    return ""
+                if len(text) <= limit:
+                    return text
+                return text[-limit:]
+
+            def _run(cmd, cwd=None, env=None, timeout=None):
+                return subprocess.run(
+                    cmd,
+                    cwd=cwd,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=timeout,
+                )
+
+            def _write_status(path: Path, payload: dict) -> None:
+                try:
+                    payload["updated_at"] = time.time()
+                    path.write_text(json.dumps(payload))
+                except Exception:
+                    pass
+
+            def _run_process(cmd, cwd, env, timeout, stdout_path, stderr_path, status_path, phase):
+                start = time.time()
+                with open(stdout_path, "a") as out, open(stderr_path, "a") as err:
+                    proc = subprocess.Popen(
+                        cmd,
+                        cwd=cwd,
+                        env=env,
+                        stdout=out,
+                        stderr=err,
+                        text=True,
+                    )
+                    last_status = 0.0
+                    while True:
+                        ret = proc.poll()
+                        now = time.time()
+                        if timeout and now - start > timeout:
+                            proc.kill()
+                            raise subprocess.TimeoutExpired(cmd, timeout)
+                        if now - last_status >= 2.0:
+                            _write_status(
+                                status_path,
+                                {
+                                    "phase": phase,
+                                    "elapsed": now - start,
+                                },
+                            )
+                            last_status = now
+                        if ret is not None:
+                            return ret
+                        time.sleep(0.5)
+
+            queue_path = Path(QUEUE_DIR)
+            queue_path.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(queue_path, 0o777)
+            except Exception:
+                pass
+            try:
+                ready_path = queue_path / "worker.ready"
+                ready_path.write_text(json.dumps({"pid": os.getpid(), "started_at": time.time()}))
+                os.chmod(ready_path, 0o666)
+            except Exception:
+                pass
+
+            while True:
+                jobs = sorted(queue_path.glob("*.json"))
+                if not jobs:
+                    time.sleep(0.2)
+                    continue
+
+                job_path = jobs[0]
+                job_id = job_path.stem
+                done_path = queue_path / f"{job_id}.done"
+                payload = {
+                    "job_id": job_id,
+                    "status": "error",
+                    "result": None,
+                    "error": None,
+                }
+                started_at = time.time()
+
+                try:
+                    job = json.loads(job_path.read_text())
+                    task_id = job.get("task_id")
+                    task_dir = job.get("task_dir")
+                    env_override = job.get("env_override") or {}
+                    timeout = int(job.get("timeout") or 7200)
+                    queued_at = job.get("queued_at")
+                    if task_id:
+                        payload["task_id"] = task_id
+                    if task_dir:
+                        payload["task_dir"] = task_dir
+                    if not task_dir:
+                        raise RuntimeError("task_dir missing from job payload")
+
+                    task_dir_path = Path(task_dir)
+                    task_dir_path.mkdir(parents=True, exist_ok=True)
+
+                    env = os.environ.copy()
+                    env.update({str(k): str(v) for k, v in env_override.items()})
+                    env["HAL_TASK_DIR"] = task_dir
+                    env["HAL_TASK_ENVIRONMENT_DIR"] = str(task_dir_path / "environment")
+                    status_path = task_dir_path / "worker_status.json"
+                    _write_status(status_path, {"phase": "starting"})
+
+                    venv_started = time.time()
+                    if USE_VENV:
+                        try:
+                            shutil.rmtree(VENV_PATH, ignore_errors=True)
+                        except Exception:
+                            pass
+                        _write_status(status_path, {"phase": "venv"})
+                        venv_stdout = task_dir_path / "worker_venv_stdout.log"
+                        venv_stderr = task_dir_path / "worker_venv_stderr.log"
+                        venv_result = _run_process(
+                            [AGENT_PYTHON, "-m", "venv", "--system-site-packages", VENV_PATH],
+                            cwd=None,
+                            env=env,
+                            timeout=600,
+                            stdout_path=venv_stdout,
+                            stderr_path=venv_stderr,
+                            status_path=status_path,
+                            phase="venv",
+                        )
+                        if venv_result != 0:
+                            raise RuntimeError("venv creation failed")
+                        env["VIRTUAL_ENV"] = VENV_PATH
+                        env["PATH"] = f"{VENV_PATH}/bin:" + env.get("PATH", "")
+                        env["PYTHONNOUSERSITE"] = "1"
+                        python_cmd = str(Path(VENV_PATH) / "bin" / "python")
+                    else:
+                        python_cmd = AGENT_PYTHON
+                    venv_finished = time.time()
+
+                    setup_started = time.time()
+                    setup_script = task_dir_path / "setup_script.sh"
+                    if setup_script.exists():
+                        task_dir_safe = shlex.quote(task_dir)
+                        setup_safe = shlex.quote(str(setup_script))
+                        _write_status(status_path, {"phase": "setup"})
+                        setup_stdout = task_dir_path / "worker_setup_stdout.log"
+                        setup_stderr = task_dir_path / "worker_setup_stderr.log"
+                        setup_result = _run_process(
+                            ["bash", "-lc", f"cd {task_dir_safe} && bash {setup_safe}"],
+                            cwd=None,
+                            env=env,
+                            timeout=timeout,
+                            stdout_path=setup_stdout,
+                            stderr_path=setup_stderr,
+                            status_path=status_path,
+                            phase="setup",
+                        )
+                        if setup_result != 0:
+                            raise RuntimeError("setup_script failed")
+                    setup_finished = time.time()
+
+                    run_started = time.time()
+                    _write_status(status_path, {"phase": "run"})
+                    run_stdout = task_dir_path / "worker_stdout.log"
+                    run_stderr = task_dir_path / "worker_stderr.log"
+                    run_result = _run_process(
+                        [python_cmd, "run_agent.py"],
+                        cwd=task_dir,
+                        env=env,
+                        timeout=timeout,
+                        stdout_path=run_stdout,
+                        stderr_path=run_stderr,
+                        status_path=status_path,
+                        phase="run",
+                    )
+                    run_finished = time.time()
+
+                    output_path = task_dir_path / "output.json"
+                    if output_path.exists():
+                        try:
+                            payload["result"] = json.loads(output_path.read_text())
+                        except Exception:
+                            payload["result"] = None
+
+                    if run_result != 0:
+                        raise RuntimeError(
+                            "agent run failed; see worker_stdout.log/worker_stderr.log"
+                        )
+
+                    payload["status"] = "ok"
+                    payload["metrics"] = {
+                        "queued_at": queued_at,
+                        "started_at": started_at,
+                        "finished_at": time.time(),
+                        "venv_seconds": venv_finished - venv_started,
+                        "setup_seconds": setup_finished - setup_started,
+                        "run_seconds": run_finished - run_started,
+                    }
+
+                except subprocess.TimeoutExpired:
+                    payload["status"] = "timeout"
+                    payload["error"] = "timeout"
+                    payload["metrics"] = {
+                        "queued_at": job.get("queued_at") if isinstance(job, dict) else None,
+                        "started_at": started_at,
+                        "finished_at": time.time(),
+                    }
+                except Exception as exc:
+                    payload["status"] = "error"
+                    payload["error"] = str(exc)
+                    payload["traceback"] = _tail(traceback.format_exc())
+                    payload["metrics"] = {
+                        "queued_at": job.get("queued_at") if isinstance(job, dict) else None,
+                        "started_at": started_at,
+                        "finished_at": time.time(),
+                    }
+
+                try:
+                    done_path.write_text(json.dumps(payload))
+                    os.chmod(done_path, 0o666)
+                except Exception:
+                    pass
+
+                try:
+                    task_dir = payload.get("task_dir")
+                    if task_dir:
+                        subprocess.run(["chmod", "-R", "a+rwx", task_dir], check=False)
+                except Exception:
+                    pass
+
+                try:
+                    job_path.unlink()
+                except Exception:
+                    pass
+            '''
+        ).lstrip()
 
     def _collect_env_vars(self, env_override: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         env_vars: Dict[str, str] = {k: v for k, v in os.environ.items() if isinstance(v, str)}
@@ -284,6 +567,27 @@ class DockerRunner:
         self._active_containers.append(container_id)
         await self._toolchain_preflight(container, image_tag)
         await self._azure_token_preflight(container, image_tag, env_vars)
+        if self._worker_mode:
+            worker_path = self._worker_script_path(host_root)
+            try:
+                worker_cmd = (
+                    "nohup /opt/conda/envs/agent_env/bin/python /workspace/hal_worker.py "
+                    ">/workspace/worker.log 2>&1 &"
+                )
+                result = container.exec_run(["bash", "-lc", worker_cmd])
+                if result.exit_code != 0:
+                    out = (result.output or b"").decode(errors="replace")
+                    raise RuntimeError(out.strip() or f"worker exec failed (exit {result.exit_code})")
+                ready_path = self._queue_dir(host_root) / "worker.ready"
+                ready_deadline = time.time() + 10
+                while time.time() < ready_deadline:
+                    if ready_path.exists():
+                        break
+                    await asyncio.sleep(0.2)
+                if not ready_path.exists():
+                    raise RuntimeError("worker did not signal ready; check /workspace/worker.log in the container")
+            except Exception as e:
+                raise RuntimeError(f"Failed to start worker in container {container_id}: {e}") from e
         return _ContainerLease(container_id=container_id, host_root=host_root)
 
     async def _ensure_container_pool(self, prepared_image: str, agent_dir: str) -> None:
@@ -296,6 +600,10 @@ class DockerRunner:
             env_vars["HAL_HARNESS_ROOT"] = "/workspace/hal-harness"
             env_vars["HAL_TASK_DIR"] = "/workspace/task"
             env_vars["HAL_TASK_ENVIRONMENT_DIR"] = "/workspace/task/environment"
+            env_vars["HAL_TASK_QUEUE_DIR"] = "/workspace/queue"
+            env_vars["HAL_TASK_VENV_PATH"] = "/tmp/hal_task_venv"
+            env_vars["HAL_AGENT_PYTHON"] = "/opt/conda/envs/agent_env/bin/python"
+            env_vars["HAL_DOCKER_TASK_VENV"] = "1" if self._task_venv else "0"
             volumes_base = self._configure_azure_mount(env_vars)
             extra_hosts = self._resolve_extra_hosts()
             tmpfs = {"/tmp": "size=1G,mode=1777"}
@@ -317,6 +625,11 @@ class DockerRunner:
                 pool_root.mkdir(parents=True, exist_ok=True)
                 host_root = Path(tempfile.mkdtemp(prefix="hal_docker_pool_", dir=pool_root))
                 (host_root / "task").mkdir(parents=True, exist_ok=True)
+                self._queue_dir(host_root).mkdir(parents=True, exist_ok=True)
+                self._staging_root(host_root).mkdir(parents=True, exist_ok=True)
+                worker_path = self._worker_script_path(host_root)
+                if self._worker_mode:
+                    worker_path.write_text(self._create_worker_script(), encoding="utf-8")
                 self._seed_shared_workspace(host_root, agent_dir_path)
                 lease = await self._start_pool_container(host_root)
                 await pool.put(lease)
@@ -1273,6 +1586,17 @@ class DockerRunner:
                              timeout: int = 7200,
                              env_override: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
         """Process a single task using a pooled Docker container"""
+        if self._worker_mode:
+            return await self._run_single_task_worker(
+                task_id=task_id,
+                input_data=input_data,
+                agent_function=agent_function,
+                agent_dir=agent_dir,
+                agent_args=agent_args,
+                run_id=run_id,
+                timeout=timeout,
+                env_override=env_override,
+            )
         lease = await self._acquire_pool_container()
         container_id = lease.container_id
         host_root = lease.host_root
@@ -1482,6 +1806,247 @@ class DockerRunner:
                 await proc.communicate()
             except Exception:
                 pass
+            await self._release_pool_container(lease)
+
+    async def _run_single_task_worker(self,
+                             task_id: str,
+                             input_data: Any,
+                             agent_function: str,
+                             agent_dir: str,
+                             agent_args: Dict[str, Any],
+                             run_id: str,
+                             timeout: int = 7200,
+                             env_override: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
+        """Process a single task using the pooled in-container worker."""
+        lease = await self._acquire_pool_container()
+        host_root = lease.host_root
+        queue_dir = self._queue_dir(host_root)
+        staging_root = self._staging_root(host_root)
+        job_id = f"job-{uuid.uuid4().hex}"
+        task_stage = staging_root / job_id
+        result = None
+        job_path: Optional[Path] = None
+        done_path: Optional[Path] = None
+        status_path = task_stage / "worker_status.json"
+        stdout_path = task_stage / "worker_stdout.log"
+        stderr_path = task_stage / "worker_stderr.log"
+        last_stdout_offset = 0
+        last_stderr_offset = 0
+        last_status_phase: Optional[str] = None
+        last_status_update = 0.0
+
+        try:
+            task_stage.mkdir(parents=True, exist_ok=True)
+
+            agent_dir_path = Path(agent_dir).resolve()
+
+            with open(task_stage / "input.json", "w") as f:
+                json.dump({task_id: input_data}, f)
+            with open(task_stage / "agent_args.json", "w") as f:
+                json.dump(agent_args, f)
+
+            if isinstance(input_data, dict) and 'files' in input_data:
+                for dest_path, src_path in input_data['files'].items():
+                    dest_path = dest_path.replace('/root/', '').lstrip('/')
+                    dest_full_path = task_stage / dest_path
+                    dest_full_path.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        if os.path.isdir(src_path):
+                            shutil.copytree(src_path, dest_full_path, dirs_exist_ok=True)
+                        else:
+                            shutil.copy2(src_path, dest_full_path)
+                    except Exception as e:
+                        verbose_logger.debug(f"Warning: Failed to copy task file {src_path} to {dest_full_path}: {e}")
+
+            try:
+                results_dir = task_stage / "results"
+                env_dir = task_stage / "environment"
+                results_dir.mkdir(parents=True, exist_ok=True)
+                env_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.chmod(results_dir, 0o777)
+                except Exception:
+                    pass
+                env_results = env_dir / "results"
+                if not env_results.exists():
+                    env_results.symlink_to(results_dir)
+            except Exception:
+                pass
+
+            weave_project = self._weave_project_for_run(run_id)
+            trace_filename = f"{run_id}_UPLOAD.json"
+            script = self._create_runner_script(
+                agent_function=agent_function,
+                task_id=task_id,
+                run_id=run_id,
+                agent_name=agent_dir_path.name,
+                weave_project=weave_project,
+                weave_op_name=task_id,
+                trace_filename=trace_filename,
+            )
+            script_path = task_stage / "run_agent.py"
+            with open(script_path, "w") as f:
+                f.write(script)
+
+            if self.benchmark and self.benchmark.setup_script:
+                setup_script_src = Path(self.benchmark.setup_script)
+                if setup_script_src.exists():
+                    setup_dest = task_stage / "setup_script.sh"
+                    shutil.copy2(setup_script_src, setup_dest)
+
+            container_task_dir = f"/workspace/staging/{job_id}"
+            job_payload = {
+                "job_id": job_id,
+                "task_id": task_id,
+                "task_dir": container_task_dir,
+                "timeout": timeout,
+                "env_override": {str(k): str(v) for k, v in (env_override or {}).items()},
+                "queued_at": time.time(),
+            }
+            job_path = queue_dir / f"{job_id}.json"
+            done_path = queue_dir / f"{job_id}.done"
+            job_path.write_text(json.dumps(job_payload))
+
+            start_time = time.time()
+            wait_timeout = timeout + 300
+            while time.time() - start_time < wait_timeout:
+                if self._worker_verbose:
+                    if stdout_path.exists():
+                        try:
+                            with open(stdout_path, "rb") as f:
+                                f.seek(last_stdout_offset)
+                                data = f.read()
+                                last_stdout_offset = f.tell()
+                            if data:
+                                for line in data.decode(errors="replace").splitlines():
+                                    verbose_logger.debug("[hal][worker][%s][stdout] %s", task_id, line)
+                        except Exception:
+                            pass
+                    if stderr_path.exists():
+                        try:
+                            with open(stderr_path, "rb") as f:
+                                f.seek(last_stderr_offset)
+                                data = f.read()
+                                last_stderr_offset = f.tell()
+                            if data:
+                                for line in data.decode(errors="replace").splitlines():
+                                    verbose_logger.debug("[hal][worker][%s][stderr] %s", task_id, line)
+                        except Exception:
+                            pass
+                    if self._worker_status_logs and status_path.exists():
+                        try:
+                            status = json.loads(status_path.read_text())
+                            phase = status.get("phase")
+                            updated_at = float(status.get("updated_at") or 0)
+                            if phase and (phase != last_status_phase or updated_at - last_status_update > 10):
+                                last_status_phase = phase
+                                last_status_update = updated_at
+                                elapsed = status.get("elapsed")
+                                if isinstance(elapsed, (int, float)):
+                                    verbose_logger.debug(
+                                        "[hal][worker][%s] phase=%s elapsed=%.1fs",
+                                        task_id,
+                                        phase,
+                                        elapsed,
+                                    )
+                                else:
+                                    verbose_logger.debug("[hal][worker][%s] phase=%s", task_id, phase)
+                        except Exception:
+                            pass
+                if done_path and done_path.exists():
+                    payload = json.loads(done_path.read_text())
+                    status = payload.get("status")
+                    if status == "ok":
+                        result = payload.get("result")
+                    elif status == "timeout":
+                        result = {task_id: f"TIMEOUT after {timeout} seconds"}
+                    else:
+                        error_detail = payload.get("error") or "unknown error"
+                        result = {task_id: f"ERROR: {error_detail}"}
+                    if self._worker_metrics:
+                        metrics = payload.get("metrics") or {}
+                        queued_at = metrics.get("queued_at")
+                        started_at = metrics.get("started_at")
+                        finished_at = metrics.get("finished_at")
+                        queue_delay = None
+                        if queued_at and started_at:
+                            try:
+                                queue_delay = float(started_at) - float(queued_at)
+                            except (TypeError, ValueError):
+                                queue_delay = None
+                        durations = []
+                        if queue_delay is not None:
+                            durations.append(f"queue={queue_delay:.2f}s")
+                        venv_seconds = metrics.get("venv_seconds")
+                        if isinstance(venv_seconds, (int, float)):
+                            durations.append(f"venv={venv_seconds:.2f}s")
+                        setup_seconds = metrics.get("setup_seconds")
+                        if isinstance(setup_seconds, (int, float)):
+                            durations.append(f"setup={setup_seconds:.2f}s")
+                        run_seconds = metrics.get("run_seconds")
+                        if isinstance(run_seconds, (int, float)):
+                            durations.append(f"run={run_seconds:.2f}s")
+                        if started_at and finished_at:
+                            try:
+                                total = float(finished_at) - float(started_at)
+                                durations.append(f"total={total:.2f}s")
+                            except (TypeError, ValueError):
+                                pass
+                        if durations:
+                            verbose_logger.info(
+                                "[hal][worker] task %s metrics: %s",
+                                task_id,
+                                ", ".join(durations),
+                            )
+                    break
+                await asyncio.sleep(1)
+
+            if result is None:
+                verbose_logger.debug(f"Task {task_id} timed out after {wait_timeout} seconds")
+                return {task_id: f"TIMEOUT after {timeout} seconds"}
+
+            return result
+
+        except Exception as e:
+            error_msg = f"Error processing task {task_id}: {e}"
+            verbose_logger.debug(error_msg)
+            return {task_id: f"ERROR: {str(e)}"}
+
+        finally:
+            try:
+                if self.log_dir:
+                    task_log_dir = os.path.join(self.log_dir, task_id)
+                    def ignore_missing(directory, files):
+                        ignored = []
+                        for f in files:
+                            path = os.path.join(directory, f)
+                            if not os.path.exists(path):
+                                ignored.append(f)
+                        return ignored
+                    try:
+                        shutil.copytree(task_stage, task_log_dir, dirs_exist_ok=True,
+                                       ignore=ignore_missing, ignore_dangling_symlinks=True)
+                    except shutil.Error as copy_errors:
+                        verbose_logger.debug(f"Some files not copied for task {task_id}: {copy_errors}")
+
+                try:
+                    if task_stage.exists():
+                        shutil.rmtree(task_stage)
+                except Exception as e:
+                    verbose_logger.debug(f"Warning: Failed to cleanup worker staging dir for task {task_id}: {e}")
+
+                try:
+                    if job_path.exists():
+                        job_path.unlink()
+                except Exception:
+                    pass
+                try:
+                    if done_path and done_path.exists():
+                        done_path.unlink()
+                except Exception:
+                    pass
+            except Exception as e:
+                verbose_logger.debug(f"Warning: Failed to cleanup worker artifacts for task {task_id}: {e}")
             await self._release_pool_container(lease)
 
     def _create_runner_script(

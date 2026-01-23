@@ -516,6 +516,10 @@ hal-eval --benchmark <benchmark_name> --agent_dir <agent_directory> --agent_func
 - **`HAL_DOCKER_POOL_SIZE=<number>`**: Number of pooled containers to keep warm (defaults to `--max_concurrent`).
 - **`HAL_DOCKER_TASK_VENV=0`**: Disable per-task virtualenvs in pooled containers. By default, each pooled task runs in a fresh venv (with system-site-packages) so ad-hoc `pip install` calls don’t leak into later tasks.
 - **`HAL_DOCKER_POOL_ROOT=<path>`**: Override where pooled workspaces live. Defaults to the repo `./.tmp` when running from this checkout.
+- **`HAL_DOCKER_WORKER_MODE=0`**: Disable the pooled in-container worker loop (enabled by default). Worker mode avoids per-task `docker exec`/Python startup by letting a long-lived container process handle tasks from a queue.
+- **`HAL_DOCKER_WORKER_METRICS=1`**: Emit per-task queue/venv/setup/run timings from the worker loop to help tune throughput.
+- **`HAL_DOCKER_WORKER_VERBOSE=0`**: Reduce worker task log streaming (default is verbose; logs stdout/stderr lines and phase updates while a task runs).
+- **`HAL_DOCKER_WORKER_STATUS_LOGS=1`**: Enable worker phase/elapsed status logs (disabled by default to avoid noisy per-task updates).
 
 ### Example Evaluations
 
