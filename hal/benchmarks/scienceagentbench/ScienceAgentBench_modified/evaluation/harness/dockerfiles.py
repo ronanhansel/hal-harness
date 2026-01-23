@@ -93,6 +93,8 @@ RUN set -e; \
 
 RUN /opt/miniconda3/bin/pip install --exists-action i --no-cache-dir -r /testbed/instance_requirements.txt
 
+RUN /opt/miniconda3/bin/pip install --exists-action i --no-cache-dir "numpy<2"
+
 RUN set -e; \
     extracted_pkgs=$(cat /testbed/instance_requirements.txt); \
     if echo "$extracted_pkgs" | grep -q 'deepchem'; then \

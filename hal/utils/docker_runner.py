@@ -12,6 +12,7 @@ import hashlib
 import shlex
 import urllib.parse
 import re
+import textwrap
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List
 from pathlib import Path
@@ -49,11 +50,16 @@ class DockerRunner:
         self._toolchain_preflight_by_image: dict[str, bool] = {}
         self._azure_preflight_lock = asyncio.Lock()
         self._azure_preflight_by_image: dict[str, bool] = {}
-        self._reuse_containers = (os.getenv("HAL_DOCKER_REUSE_CONTAINERS") or "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-        )
+        reuse_setting = os.getenv("HAL_DOCKER_REUSE_CONTAINERS")
+        if reuse_setting is None or reuse_setting.strip() == "":
+            self._reuse_containers = True
+        else:
+            self._reuse_containers = reuse_setting.strip().lower() in ("1", "true", "yes")
+        task_venv_setting = os.getenv("HAL_DOCKER_TASK_VENV")
+        if task_venv_setting is None or task_venv_setting.strip() == "":
+            self._task_venv = True
+        else:
+            self._task_venv = task_venv_setting.strip().lower() in ("1", "true", "yes")
         self._container_pool: Optional[asyncio.Queue[_ContainerLease]] = None
         self._pool_lock = asyncio.Lock()
         self._pool_spec: Optional[Dict[str, Any]] = None
@@ -147,6 +153,16 @@ class DockerRunner:
                 pass
         return max(1, self.max_concurrent)
 
+    def _pool_root_dir(self) -> Path:
+        override = os.getenv("HAL_DOCKER_POOL_ROOT")
+        if override:
+            return Path(override).expanduser()
+        file_path = Path(__file__).resolve()
+        for parent in file_path.parents:
+            if parent.name == "hal-harness":
+                return parent.parent / ".tmp"
+        return Path.cwd() / ".tmp"
+
     def _collect_env_vars(self, env_override: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         env_vars: Dict[str, str] = {k: v for k, v in os.environ.items() if isinstance(v, str)}
         try:
@@ -164,6 +180,13 @@ class DockerRunner:
         env_vars.setdefault("BASH_ENV", "/opt/conda/etc/profile.d/conda.sh")
         env_vars = self._sanitize_forwarded_env(env_vars)
         env_vars["PATH"] = self._default_container_path()
+        # Avoid noisy locale warnings when host sets en_US.UTF-8 but the container lacks that locale.
+        for key in ("LANG", "LC_ALL"):
+            val = (env_vars.get(key) or "").strip()
+            if not val:
+                env_vars[key] = "C.UTF-8"
+            elif val.lower() in ("en_us.utf-8", "en_us.utf8"):
+                env_vars[key] = "C.UTF-8"
         self._maybe_warn_about_openai_base_url(env_vars)
         return env_vars
 
@@ -290,7 +313,9 @@ class DockerRunner:
             agent_dir_path = Path(agent_dir).resolve()
 
             for _ in range(self._pool_size()):
-                host_root = Path(tempfile.mkdtemp(prefix="hal_docker_pool_"))
+                pool_root = self._pool_root_dir()
+                pool_root.mkdir(parents=True, exist_ok=True)
+                host_root = Path(tempfile.mkdtemp(prefix="hal_docker_pool_", dir=pool_root))
                 (host_root / "task").mkdir(parents=True, exist_ok=True)
                 self._seed_shared_workspace(host_root, agent_dir_path)
                 lease = await self._start_pool_container(host_root)
@@ -1255,11 +1280,22 @@ class DockerRunner:
         result = None
 
         try:
-            if task_root.exists():
-                shutil.rmtree(task_root)
             task_root.mkdir(parents=True, exist_ok=True)
+            proc = await asyncio.create_subprocess_exec(
+                "docker",
+                "exec",
+                container_id,
+                "bash",
+                "-lc",
+                "rm -rf /workspace/task/*",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
 
             agent_dir_path = Path(agent_dir).resolve()
+            venv_path = "/tmp/hal_task_venv"
+            venv_enabled = self._task_venv
 
             with open(task_root / "input.json", "w") as f:
                 json.dump({task_id: input_data}, f)
@@ -1279,6 +1315,21 @@ class DockerRunner:
                     except Exception as e:
                         verbose_logger.debug(f"Warning: Failed to copy task file {src_path} to {dest_full_path}: {e}")
 
+            try:
+                results_dir = task_root / "results"
+                env_dir = task_root / "environment"
+                results_dir.mkdir(parents=True, exist_ok=True)
+                env_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.chmod(results_dir, 0o777)
+                except Exception:
+                    pass
+                env_results = env_dir / "results"
+                if not env_results.exists():
+                    env_results.symlink_to(results_dir)
+            except Exception:
+                pass
+
             weave_project = self._weave_project_for_run(run_id)
             trace_filename = f"{run_id}_UPLOAD.json"
             script = self._create_runner_script(
@@ -1294,13 +1345,52 @@ class DockerRunner:
             with open(script_path, "w") as f:
                 f.write(script)
 
+            env_prefix = ""
+            parts: List[str] = []
+            if env_override:
+                for k, v in env_override.items():
+                    if v is None:
+                        continue
+                    parts.append(f"{shlex.quote(str(k))}={shlex.quote(str(v))}")
+            if venv_enabled:
+                venv_path_value = f"{venv_path}/bin:{self._default_container_path()}"
+                parts.append(f"VIRTUAL_ENV={shlex.quote(venv_path)}")
+                parts.append(f"PATH={shlex.quote(venv_path_value)}")
+                parts.append("PYTHONNOUSERSITE=1")
+            if parts:
+                env_prefix = " ".join(parts) + " "
+
+            if venv_enabled:
+                proc = await asyncio.create_subprocess_exec(
+                    "docker",
+                    "exec",
+                    container_id,
+                    "bash",
+                    "-lc",
+                    f"rm -rf {shlex.quote(venv_path)} && "
+                    "/opt/conda/bin/conda run -n agent_env python -m venv --system-site-packages "
+                    f"{shlex.quote(venv_path)}",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+                if stdout:
+                    verbose_logger.debug(f"Container {container_id}: {stdout.decode()}")
+                if stderr:
+                    verbose_logger.debug(f"Container {container_id}: {stderr.decode()}")
+
             if self.benchmark and self.benchmark.setup_script:
                 setup_script_src = Path(self.benchmark.setup_script)
                 if setup_script_src.exists():
                     setup_dest = task_root / "setup_script.sh"
                     shutil.copy2(setup_script_src, setup_dest)
                     proc = await asyncio.create_subprocess_exec(
-                        "docker", "exec", container_id, "bash", "/workspace/task/setup_script.sh",
+                        "docker",
+                        "exec",
+                        container_id,
+                        "bash",
+                        "-c",
+                        f"{env_prefix}cd /workspace/task && bash /workspace/task/setup_script.sh",
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE
                     )
@@ -1310,24 +1400,17 @@ class DockerRunner:
                     if stderr:
                         verbose_logger.debug(f"Container {container_id}: {stderr.decode()}")
 
-            env_prefix = ""
-            if env_override:
-                parts: List[str] = []
-                for k, v in env_override.items():
-                    if v is None:
-                        continue
-                    parts.append(f"{shlex.quote(str(k))}={shlex.quote(str(v))}")
-                if parts:
-                    env_prefix = " ".join(parts) + " "
-
             start_time = time.time()
+            python_cmd = "python"
+            if not venv_enabled:
+                python_cmd = "/opt/conda/bin/conda run -n agent_env python"
             proc = await asyncio.create_subprocess_exec(
                 "docker",
                 "exec",
                 container_id,
                 "bash",
                 "-c",
-                f"{env_prefix}cd /workspace/task && /opt/conda/bin/conda run -n agent_env python run_agent.py",
+                f"{env_prefix}cd /workspace/task && {python_cmd} run_agent.py",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -1358,6 +1441,17 @@ class DockerRunner:
 
         finally:
             try:
+                proc = await asyncio.create_subprocess_exec(
+                    "docker",
+                    "exec",
+                    container_id,
+                    "bash",
+                    "-lc",
+                    "chmod -R a+rwx /workspace/task >/dev/null 2>&1 || true",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await proc.communicate()
                 if self.log_dir:
                     task_log_dir = os.path.join(self.log_dir, task_id)
                     def ignore_missing(directory, files):
@@ -1372,11 +1466,22 @@ class DockerRunner:
                                        ignore=ignore_missing, ignore_dangling_symlinks=True)
                     except shutil.Error as copy_errors:
                         verbose_logger.debug(f"Some files not copied for task {task_id}: {copy_errors}")
-
-                if task_root.exists():
-                    shutil.rmtree(task_root)
             except Exception as e:
                 verbose_logger.debug(f"Warning: Failed to cleanup pooled task root for task {task_id}: {e}")
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "docker",
+                    "exec",
+                    container_id,
+                    "bash",
+                    "-lc",
+                    f"rm -rf /workspace/task/* {shlex.quote(venv_path)}",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await proc.communicate()
+            except Exception:
+                pass
             await self._release_pool_container(lease)
 
     def _create_runner_script(
@@ -1394,7 +1499,7 @@ class DockerRunner:
         """
         module_name, function_name = agent_function.rsplit(".", 1)
         
-        return f'''
+        return textwrap.dedent(f'''
 import os
 import json
 import importlib.util
@@ -1580,4 +1685,4 @@ finally:
             weave.finish()
         except Exception:
             pass
-''' 
+''').lstrip()

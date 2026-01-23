@@ -512,8 +512,10 @@ hal-eval --benchmark <benchmark_name> --agent_dir <agent_directory> --agent_func
 
 ### Docker Throughput Tuning
 
-- **`HAL_DOCKER_REUSE_CONTAINERS=1`**: Reuse a fixed pool of Docker containers instead of starting one per task. This significantly reduces overhead but can allow state to persist between tasks.
+- **`HAL_DOCKER_REUSE_CONTAINERS=0`**: Disable the default pooled-container mode and revert to one container per task. Pooling is enabled by default to reduce overhead but can allow state to persist between tasks.
 - **`HAL_DOCKER_POOL_SIZE=<number>`**: Number of pooled containers to keep warm (defaults to `--max_concurrent`).
+- **`HAL_DOCKER_TASK_VENV=0`**: Disable per-task virtualenvs in pooled containers. By default, each pooled task runs in a fresh venv (with system-site-packages) so ad-hoc `pip install` calls don’t leak into later tasks.
+- **`HAL_DOCKER_POOL_ROOT=<path>`**: Override where pooled workspaces live. Defaults to the repo `./.tmp` when running from this checkout.
 
 ### Example Evaluations
 

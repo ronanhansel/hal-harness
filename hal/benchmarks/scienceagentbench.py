@@ -111,7 +111,8 @@ class ScienceAgentBench(BaseBenchmark):
         # Sort numerically to maintain consistent ordering
         task_ids = sorted(self.benchmark.keys(), key=lambda x: int(x) if x.isdigit() else float('inf'))
         for task_id in task_ids:
-            if agent_output[task_id] == "TIMEOUT after 900 seconds" or agent_output[task_id] == "TIMEOUT after 7200 seconds":
+            output = agent_output[task_id]
+            if output == "TIMEOUT after 900 seconds" or output == "TIMEOUT after 7200 seconds":
                 run_log.append({
                     "history": [
                         {
@@ -121,8 +122,18 @@ class ScienceAgentBench(BaseBenchmark):
                     ],
                     "cost": 0.0 # need to rely on weave log for accurate cost
                 })
+            elif isinstance(output, str):
+                run_log.append({
+                    "history": [
+                        {
+                            "role": "assistant",
+                            "content": output,
+                        }
+                    ],
+                    "cost": 0.0,
+                })
             else:
-                run_log.append(agent_output[task_id])
+                run_log.append(output)
             eval_log.append(eval_result[task_id])
         
         metrics = evaluate_best_run([run_log], [eval_log])
