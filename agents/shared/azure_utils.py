@@ -15,14 +15,18 @@ Usage:
     )
 
 Environment Variables:
-    USE_DIRECT_AZURE: Set to "true" to enable direct Azure mode
+    USE_DIRECT_AZURE: Set to "true" to enable direct Azure mode (auto-enabled if MSAL cache exists)
     USE_TRAPI: Set to "true" to use TRAPI (default: true)
-    AZURE_OPENAI_AD_TOKEN: Pre-fetched Azure AD token (for Docker containers)
     TRAPI_ENDPOINT: TRAPI endpoint URL
     TRAPI_API_VERSION: API version for TRAPI
     TRAPI_SCOPE: OAuth scope for TRAPI
     TRAPI_MAX_RETRIES: Max retries for failed requests
     TRAPI_TIMEOUT: Request timeout in seconds
+
+Authentication:
+    Uses MSAL token provider for automatic token refresh (required for long-running benchmarks).
+    Pre-fetched tokens are NOT supported as they expire after ~1 hour.
+    Mount ~/.azure directory with MSAL cache for Docker containers.
 """
 
 import os
@@ -319,23 +323,12 @@ def get_trapi_client(
     if timeout is None:
         timeout = float(os.environ.get('TRAPI_TIMEOUT', 1800))
 
-    # Method 1: Pre-fetched token from HAL Docker runner
-    prefetched_token = os.environ.get('AZURE_OPENAI_AD_TOKEN')
-    if prefetched_token:
-        print(f"[azure_utils] Using pre-fetched Azure AD token (length: {len(prefetched_token)})")
-        print(f"[azure_utils] Retry config: max_retries={max_retries}, timeout={timeout}s")
-        return AzureOpenAI(
-            azure_endpoint=endpoint,
-            azure_ad_token=prefetched_token,
-            api_version=api_version,
-            max_retries=max_retries,
-            timeout=timeout,
-        )
-
-    # Method 2: MSAL token provider (works in containers without az CLI)
+    # Method 1: MSAL token provider (REQUIRED - supports automatic token refresh)
+    # MSAL can refresh tokens automatically using the refresh token in the cache
+    # This is critical for long-running benchmarks (3-4+ hours)
     msal_provider = _get_msal_token_provider(scope)
     if msal_provider:
-        print(f"[azure_utils] Using MSAL token provider")
+        print(f"[azure_utils] Using MSAL token provider (auto-refresh enabled for long-running tasks)")
         print(f"[azure_utils] Retry config: max_retries={max_retries}, timeout={timeout}s")
         return AzureOpenAI(
             azure_endpoint=endpoint,
@@ -345,7 +338,7 @@ def get_trapi_client(
             timeout=timeout,
         )
 
-    # Method 3: Azure Identity credential chain (requires az CLI or managed identity)
+    # Method 2: Azure Identity credential chain (fallback - also supports token refresh)
     if AZURE_IDENTITY_AVAILABLE:
         credential = ChainedTokenCredential(
             AzureCliCredential(),
@@ -365,10 +358,10 @@ def get_trapi_client(
 
     # No credentials available
     raise RuntimeError(
-        "No Azure credentials available. Options:\n"
-        "1. Set AZURE_OPENAI_AD_TOKEN (pre-fetched by HAL Docker runner)\n"
-        "2. Mount ~/.azure directory and ensure MSAL cache exists\n"
-        "3. Install azure-identity and run 'az login'"
+        "No Azure credentials available for long-running tasks. Options:\n"
+        "1. Mount ~/.azure directory with MSAL cache (REQUIRED for tasks >1 hour)\n"
+        "2. Install azure-identity and run 'az login'\n"
+        "NOTE: Pre-fetched tokens are NOT supported as they expire after ~1 hour."
     )
 
 
@@ -403,20 +396,11 @@ def get_azure_client(
     if timeout is None:
         timeout = float(os.environ.get('AZURE_TIMEOUT', 1800))
 
-    # Method 1: Pre-fetched token
-    prefetched_token = os.environ.get('AZURE_OPENAI_AD_TOKEN')
-    if prefetched_token:
-        return AzureOpenAI(
-            azure_endpoint=endpoint,
-            azure_ad_token=prefetched_token,
-            api_version=api_version,
-            max_retries=max_retries,
-            timeout=timeout,
-        )
-
-    # Method 2: MSAL token provider
+    # Method 1: MSAL token provider (REQUIRED - supports automatic token refresh)
+    # Critical for long-running benchmarks (3-4+ hours)
     msal_provider = _get_msal_token_provider(scope)
     if msal_provider:
+        print(f"[azure_utils] Using MSAL token provider for Azure client (auto-refresh enabled)")
         return AzureOpenAI(
             azure_endpoint=endpoint,
             azure_ad_token_provider=msal_provider,
@@ -425,11 +409,11 @@ def get_azure_client(
             timeout=timeout,
         )
 
-    # Method 3: Azure Identity
+    # Method 2: Azure Identity (fallback - also supports token refresh)
     if AZURE_IDENTITY_AVAILABLE:
         credential = AzureCliCredential()
         token_provider = get_bearer_token_provider(credential, scope)
-
+        print(f"[azure_utils] Using Azure Identity for Azure client (auto-refresh enabled)")
         return AzureOpenAI(
             azure_endpoint=endpoint,
             azure_ad_token_provider=token_provider,
@@ -439,8 +423,10 @@ def get_azure_client(
         )
 
     raise RuntimeError(
-        "No Azure credentials available. Either set AZURE_OPENAI_AD_TOKEN "
-        "(pre-fetched by HAL Docker runner), or install azure-identity and run 'az login'."
+        "No Azure credentials available for long-running tasks. Options:\n"
+        "1. Mount ~/.azure directory with MSAL cache (REQUIRED for tasks >1 hour)\n"
+        "2. Install azure-identity and run 'az login'\n"
+        "NOTE: Pre-fetched tokens are NOT supported as they expire after ~1 hour."
     )
 
 

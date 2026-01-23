@@ -1377,11 +1377,12 @@ Here is the question and attached files are stored in your current directory:
 
     
     elif kwargs['benchmark_name'] == 'colbench_backend_programming':
-        from openai import OpenAI
         from sweet_rl.environments.human_interaction_env import HumanInteractionEnv
-        env_model_name = "gpt-4o-2024-08-06"
+        # Use TRAPI client for simulated user environment (same Azure auth as agent)
+        from azure_direct_model import create_trapi_client, resolve_deployment_name
+        env_client = create_trapi_client()
+        env_model_name = resolve_deployment_name("gpt-4o")  # Resolve to TRAPI deployment name
         task_data = input[task_id]
-        env_client = OpenAI()
         isolated_env = HumanInteractionEnv(env_client, task_data["human_prompt"], env_model_name)   
         observation = isolated_env.reset(task_data["problem_description"], task_data["hidden_information"])
         @tool 
@@ -1445,11 +1446,12 @@ Here is the question and attached files are stored in your current directory:
                       "ground_truth": task_data["hidden_information"]}}}
 
     elif kwargs['benchmark_name'] == 'colbench_frontend_design':
-        from openai import OpenAI
         from sweet_rl.environments.human_design_interaction_env import HumanDesignInteractionEnv
-        env_model_name = "gpt-4o-2024-08-06"
+        # Use TRAPI client for simulated user environment (same Azure auth as agent)
+        from azure_direct_model import create_trapi_client, resolve_deployment_name
+        env_client = create_trapi_client()
+        env_model_name = resolve_deployment_name("gpt-4o")  # Resolve to TRAPI deployment name
         task_data = input[task_id]
-        env_client = OpenAI()
         isolated_env = HumanDesignInteractionEnv(env_client, task_data["human_prompt"], 
                                         env_model_name,
                                         temp_path=task_data['cache_path'],

@@ -11,3 +11,4 @@ SpeechRecognition
 tiktoken
 pandas
 litellm @ git+https://github.com/BerriAI/litellm@05955042d57fcc32c73223221d69c8336ecd5994
+msal

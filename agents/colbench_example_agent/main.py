@@ -94,13 +94,68 @@ except ImportError:
         model_lower = _normalize_model_id(model_id)
         return not any(model_lower.startswith(p) for p in ('o1', 'o3', 'o4', 'gpt-5'))
 
-    def get_trapi_client():
-        """Fallback TRAPI client creation."""
-        from openai import AzureOpenAI
-
-        # Azure constants
+    class MSALTokenProvider:
+        """
+        Token provider that reloads MSAL cache on EVERY call for automatic refresh.
+        This is critical for long-running Docker containers where tokens expire after ~1 hour.
+        """
         AZURE_CLI_CLIENT_ID = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'
         MICROSOFT_TENANT_ID = '72f988bf-86f1-41af-91ab-2d7cd011db47'
+
+        def __init__(self, scope: str = 'api://trapi/.default'):
+            self.scope = scope
+            self.cache_path = os.path.expanduser('~/.azure/msal_token_cache.json')
+            self._refresh_count = 0
+
+        def __call__(self) -> str:
+            """Get token, reloading cache from disk each time for fresh tokens."""
+            import msal
+
+            if not os.path.exists(self.cache_path):
+                raise RuntimeError(f"MSAL cache not found at {self.cache_path}")
+
+            # CRITICAL: Reload cache from disk on EVERY call
+            # This picks up tokens refreshed by other processes or the host
+            cache = msal.SerializableTokenCache()
+            with open(self.cache_path, 'r') as f:
+                cache.deserialize(f.read())
+
+            app = msal.PublicClientApplication(
+                self.AZURE_CLI_CLIENT_ID,
+                authority=f'https://login.microsoftonline.com/{self.MICROSOFT_TENANT_ID}',
+                token_cache=cache,
+            )
+
+            accounts = app.get_accounts()
+            if not accounts:
+                raise RuntimeError("No accounts found in MSAL cache. Run 'az login' first.")
+
+            # Try ALL accounts - different accounts may have tokens for different scopes
+            last_error = None
+            for account in accounts:
+                result = app.acquire_token_silent([self.scope], account=account)
+                if result and 'access_token' in result:
+                    # CRITICAL: Persist cache after token refresh
+                    if cache.has_state_changed:
+                        try:
+                            with open(self.cache_path, 'w') as f:
+                                f.write(cache.serialize())
+                        except Exception as e:
+                            print(f"[MSALTokenProvider] Warning: Could not persist cache: {e}")
+
+                    self._refresh_count += 1
+                    if self._refresh_count == 1 or self._refresh_count % 100 == 0:
+                        print(f"[MSALTokenProvider] Token acquired (refresh #{self._refresh_count})")
+                    return result['access_token']
+                else:
+                    last_error = result.get('error_description', 'Unknown error') if result else 'No token'
+
+            raise RuntimeError(f"Token acquisition failed for all accounts. Last error: {last_error}")
+
+    def get_trapi_client():
+        """Fallback TRAPI client creation with proper token refresh."""
+        from openai import AzureOpenAI
+
         DEFAULT_TRAPI_ENDPOINT = 'https://trapi.research.microsoft.com/gcr/shared'
         DEFAULT_TRAPI_API_VERSION = '2025-03-01-preview'
         DEFAULT_TRAPI_SCOPE = 'api://trapi/.default'
@@ -111,59 +166,34 @@ except ImportError:
         max_retries = int(os.environ.get('TRAPI_MAX_RETRIES', 500))
         timeout = float(os.environ.get('TRAPI_TIMEOUT', 1800))
 
-        # Method 1: Pre-fetched token
-        prefetched_token = os.environ.get('AZURE_OPENAI_AD_TOKEN')
-        if prefetched_token:
-            print(f"[colbench_agent] Using pre-fetched Azure AD token")
-            return AzureOpenAI(
-                azure_endpoint=endpoint,
-                azure_ad_token=prefetched_token,
-                api_version=api_version,
-                max_retries=max_retries,
-                timeout=timeout,
-            )
-
-        # Method 2: MSAL token provider
+        # Method 1: MSAL token provider (REQUIRED - supports automatic refresh)
+        # Critical for long-running benchmarks (3-4+ hours)
         try:
             import msal
             cache_path = os.path.expanduser('~/.azure/msal_token_cache.json')
             if os.path.exists(cache_path):
-                cache = msal.SerializableTokenCache()
-                with open(cache_path, 'r') as f:
-                    cache.deserialize(f.read())
-                app = msal.PublicClientApplication(
-                    AZURE_CLI_CLIENT_ID,
-                    authority=f'https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}',
-                    token_cache=cache,
+                token_provider = MSALTokenProvider(scope=scope)
+                # Test it works
+                token_provider()
+                print(f"[colbench_agent] Using MSAL token provider (auto-refresh enabled for long-running tasks)")
+                return AzureOpenAI(
+                    azure_endpoint=endpoint,
+                    azure_ad_token_provider=token_provider,
+                    api_version=api_version,
+                    max_retries=max_retries,
+                    timeout=timeout,
                 )
-                accounts = app.get_accounts()
-                if accounts:
-                    def token_provider():
-                        result = app.acquire_token_silent([scope], account=accounts[0])
-                        if result and 'access_token' in result:
-                            return result['access_token']
-                        raise RuntimeError("Failed to acquire token from MSAL cache")
-                    # Test it works
-                    token_provider()
-                    print(f"[colbench_agent] Using MSAL token provider")
-                    return AzureOpenAI(
-                        azure_endpoint=endpoint,
-                        azure_ad_token_provider=token_provider,
-                        api_version=api_version,
-                        max_retries=max_retries,
-                        timeout=timeout,
-                    )
         except ImportError:
-            pass
+            print(f"[colbench_agent] MSAL not available, trying Azure Identity")
         except Exception as e:
-            print(f"[colbench_agent] MSAL fallback failed: {e}")
+            print(f"[colbench_agent] MSAL token provider failed: {e}")
 
-        # Method 3: Azure Identity
+        # Method 2: Azure Identity (fallback - also supports token refresh)
         try:
             from azure.identity import AzureCliCredential, get_bearer_token_provider
             credential = AzureCliCredential()
             token_provider = get_bearer_token_provider(credential, scope)
-            print(f"[colbench_agent] Using AzureCliCredential")
+            print(f"[colbench_agent] Using AzureCliCredential (auto-refresh enabled)")
             return AzureOpenAI(
                 azure_endpoint=endpoint,
                 azure_ad_token_provider=token_provider,
@@ -174,13 +204,13 @@ except ImportError:
         except ImportError:
             pass
         except Exception as e:
-            print(f"[colbench_agent] Azure Identity fallback failed: {e}")
+            print(f"[colbench_agent] Azure Identity failed: {e}")
 
         raise RuntimeError(
-            "No Azure credentials available. Options:\n"
-            "1. Set AZURE_OPENAI_AD_TOKEN environment variable\n"
-            "2. Mount ~/.azure directory with MSAL cache\n"
-            "3. Install azure-identity and run 'az login'"
+            "No Azure credentials available for long-running tasks. Options:\n"
+            "1. Mount ~/.azure directory with MSAL cache (REQUIRED for tasks >1 hour)\n"
+            "2. Install azure-identity and run 'az login'\n"
+            "NOTE: Pre-fetched tokens are NOT supported as they expire after ~1 hour."
         )
 
 

@@ -187,7 +187,8 @@ class MSALTokenProvider:
         # Try to acquire token silently from ALL accounts (different accounts may have different scopes)
         # This fixes the issue where accounts[0] doesn't have TRAPI tokens but another account does
         last_error = None
-        for account in accounts:
+        for i, account in enumerate(accounts):
+            username = account.get('username', 'unknown')
             result = app.acquire_token_silent([self.scope], account=account)
 
             if result and 'access_token' in result:
@@ -197,9 +198,11 @@ class MSALTokenProvider:
                 self._token_refresh_count += 1
                 self._last_token_time = time.time()
 
-                # Log occasional refresh stats (include which account worked)
-                if self._token_refresh_count % 100 == 0:
-                    print(f"[MSALTokenProvider] Token refresh count: {self._token_refresh_count} (account: {account.get('username', 'unknown')})")
+                # Log on first acquisition and every 100 times
+                if self._token_refresh_count == 1:
+                    print(f"[MSALTokenProvider] Using account {i}: {username} (has valid TRAPI token)")
+                elif self._token_refresh_count % 100 == 0:
+                    print(f"[MSALTokenProvider] Token refresh #{self._token_refresh_count} (account: {username})")
 
                 return result['access_token']
             else:
@@ -207,7 +210,10 @@ class MSALTokenProvider:
                 if result:
                     last_error = f"{result.get('error', 'unknown')}: {result.get('error_description', '')}"
                 else:
-                    last_error = f"No token for account {account.get('username', 'unknown')}"
+                    last_error = f"No token for account {username}"
+                # Log which accounts don't have tokens (helps debugging)
+                if self._token_refresh_count == 0:
+                    print(f"[MSALTokenProvider] Account {i} ({username}): no TRAPI token, trying next...")
 
         # All accounts failed
         account_names = [a.get('username', 'unknown') for a in accounts]
@@ -290,8 +296,9 @@ def create_trapi_client(
     if timeout is None:
         timeout = float(os.environ.get('TRAPI_TIMEOUT', 1800))
 
-    # Method 1: Try MSAL token provider (works in containers without az CLI)
+    # Method 1: MSAL token provider (REQUIRED - supports automatic token refresh)
     # This dynamically refreshes tokens using the mounted ~/.azure cache
+    # Critical for long-running benchmarks (3-4+ hours)
     if MSAL_AVAILABLE:
         cache_path = os.path.expanduser('~/.azure/msal_token_cache.json')
         if os.path.exists(cache_path):
@@ -300,7 +307,7 @@ def create_trapi_client(
                 # Test that it works
                 test_token = token_provider()
                 if test_token:
-                    print(f"[AzureDirectModel] Using MSAL token provider (dynamic refresh)")
+                    print(f"[AzureDirectModel] Using MSAL token provider (auto-refresh enabled for long-running tasks)")
                     return AzureOpenAI(
                         azure_endpoint=endpoint,
                         azure_ad_token_provider=token_provider,
@@ -311,21 +318,9 @@ def create_trapi_client(
             except Exception as e:
                 print(f"[AzureDirectModel] MSAL token provider failed: {e}")
 
-    # Method 2: Use pre-fetched token if available (fallback for containers)
-    prefetched_token = os.environ.get('AZURE_OPENAI_AD_TOKEN')
-    if prefetched_token:
-        print(f"[AzureDirectModel] Using pre-fetched Azure AD token (length: {len(prefetched_token)})")
-        return AzureOpenAI(
-            azure_endpoint=endpoint,
-            azure_ad_token=prefetched_token,
-            api_version=api_version,
-            max_retries=max_retries,
-            timeout=timeout,
-        )
-
-    # Method 3: Use azure-identity credential chain (requires az CLI or managed identity)
+    # Method 2: Azure Identity credential chain (fallback - also supports token refresh)
     if AZURE_IDENTITY_AVAILABLE:
-        print("[AzureDirectModel] Using azure-identity credential chain")
+        print("[AzureDirectModel] Using azure-identity credential chain (auto-refresh enabled)")
         credential = ChainedTokenCredential(
             AzureCliCredential(),
             ManagedIdentityCredential(),
@@ -339,7 +334,12 @@ def create_trapi_client(
             timeout=timeout,
         )
 
-    raise RuntimeError("No authentication method available. Ensure ~/.azure is mounted or AZURE_OPENAI_AD_TOKEN is set.")
+    raise RuntimeError(
+        "No authentication method available for long-running tasks. Options:\n"
+        "1. Mount ~/.azure directory with MSAL cache (REQUIRED for tasks >1 hour)\n"
+        "2. Install azure-identity and run 'az login'\n"
+        "NOTE: Pre-fetched tokens are NOT supported as they expire after ~1 hour."
+    )
 
 
 def _extract_rate_limit_wait_time(error_message: str) -> Optional[float]:

@@ -686,31 +686,37 @@ class DockerRunner:
                 extra_hosts = None
 
             # Mount Azure CLI credentials if available (for direct Azure access)
+            # AUTO-ENABLE: If Azure credentials exist and USE_DIRECT_AZURE is not explicitly disabled,
+            # enable direct Azure access for better reliability and automatic token refresh
             volumes = {}
             azure_dir = os.path.expanduser("~/.azure")
+            msal_cache = os.path.join(azure_dir, "msal_token_cache.json")
+            azure_creds_exist = os.path.isdir(azure_dir) and os.path.isfile(msal_cache)
+
+            # Auto-enable direct Azure if credentials exist (unless explicitly disabled)
+            use_direct_azure = env_vars.get("USE_DIRECT_AZURE", "").lower()
+            if use_direct_azure == "false":
+                # Explicitly disabled
+                verbose_logger.debug("Direct Azure disabled (USE_DIRECT_AZURE=false)")
+            elif azure_creds_exist:
+                # Auto-enable if credentials exist
+                env_vars["USE_DIRECT_AZURE"] = "true"
+                verbose_logger.debug(f"Auto-enabled direct Azure (MSAL cache found at {msal_cache})")
+
             if os.path.isdir(azure_dir) and env_vars.get("USE_DIRECT_AZURE", "").lower() == "true":
                 # Mount read-write so MSAL can persist refreshed tokens
                 # MSAL handles concurrent access with file locks
+                # This is CRITICAL for long-running containers (3-4+ hours) that need token refresh
                 volumes[azure_dir] = {"bind": "/root/.azure", "mode": "rw"}
                 # Set HOME=/root so SharedTokenCacheCredential finds the mounted Azure credentials
                 env_vars["HOME"] = "/root"
-                verbose_logger.debug(f"Mounting Azure credentials from {azure_dir} (rw for token refresh)")
+                verbose_logger.debug(f"Mounting Azure credentials from {azure_dir} (rw for MSAL token refresh)")
                 # Remove proxy URLs so the agent uses direct Azure instead of LiteLLM proxy
                 for key in ("OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENAI_API_BASE_URL", "LITELLM_BASE_URL"):
                     env_vars.pop(key, None)
-                # Pre-fetch a fresh Azure AD token on the host and pass it to the container
-                # This avoids needing az CLI in the container
-                try:
-                    from azure.identity import AzureCliCredential, get_bearer_token_provider
-                    scope = env_vars.get("TRAPI_SCOPE", "api://trapi/.default")
-                    credential = AzureCliCredential()
-                    token_provider = get_bearer_token_provider(credential, scope)
-                    token = token_provider()
-                    env_vars["AZURE_OPENAI_AD_TOKEN"] = token
-                    verbose_logger.debug(f"Pre-fetched Azure AD token (length: {len(token)})")
-                except Exception as e:
-                    verbose_logger.debug(f"Could not pre-fetch Azure AD token: {e}")
-                verbose_logger.debug("Removed proxy URLs for direct Azure access")
+                # NOTE: We do NOT pre-fetch tokens because they expire after ~1 hour
+                # Agents MUST use MSAL token provider which refreshes tokens automatically
+                verbose_logger.debug("Azure MSAL mode enabled - tokens will auto-refresh for long-running tasks")
 
             # Add tmpfs mount for /tmp to fix Azure CLI issues in container
             tmpfs = {"/tmp": "size=1G,mode=1777"}
