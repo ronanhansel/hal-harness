@@ -102,6 +102,8 @@ def main(
     **kwargs,
 ):
     """Run agent evaluation on specified benchmark with given model."""
+    verbose_log_path: Optional[str] = None
+    results_root: Optional[str] = None
     try:
         # Parse agent and benchmark args
         print_step("Parsing configuration...")
@@ -124,7 +126,10 @@ def main(
             set_run_id = True
         
         # Setup logging first, before any other operations
-        log_dir = os.path.join("results", benchmark, run_id)
+        results_root = "results"
+        if os.path.islink(results_root) and not os.path.exists(results_root):
+            results_root = ".results"
+        log_dir = os.path.join(results_root, benchmark, run_id)
         os.makedirs(log_dir, exist_ok=True)
         verbose_log_path = os.path.join(log_dir, f"{run_id}_verbose.log")
         setup_logging(log_dir, run_id)
@@ -282,16 +287,18 @@ def main(
         # Get the full traceback
         full_traceback = traceback.format_exc()
         
-        # Log the full error to the verbose log file
-        with open(verbose_log_path, 'a') as f:
-            f.write("\n=== ERROR TRACEBACK ===\n")
-            f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(full_traceback)
-            f.write("\n=== END ERROR TRACEBACK ===\n")
+        # Log the full error to the verbose log file when available
+        if verbose_log_path:
+            with open(verbose_log_path, 'a') as f:
+                f.write("\n=== ERROR TRACEBACK ===\n")
+                f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(full_traceback)
+                f.write("\n=== END ERROR TRACEBACK ===\n")
         
         # Print clean error message to terminal
         print_error(f"An error occurred: {str(e)}")
-        print_error(f"For detailed error information, check: {verbose_log_path}", verbose_log_path)
+        if verbose_log_path:
+            print_error(f"For detailed error information, check: {verbose_log_path}", verbose_log_path)
         sys.exit(1)
 
 

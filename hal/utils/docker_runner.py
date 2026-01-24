@@ -2073,6 +2073,185 @@ import socket
 import urllib.parse
 import re
 import sys
+import time
+import uuid
+from datetime import datetime
+
+TRACE_MODE = (os.getenv("HAL_TRACE_MODE") or "").strip().lower()
+if not TRACE_MODE:
+    TRACE_MODE = "weave" if os.getenv("WANDB_API_KEY") else "local"
+LOCAL_TRACE_ENABLED = TRACE_MODE in ("local", "both")
+WEAVE_TRACE_ENABLED = TRACE_MODE in ("weave", "both")
+
+if LOCAL_TRACE_ENABLED and TRACE_MODE == "local":
+    os.environ.setdefault("WANDB_MODE", "disabled")
+    os.environ.setdefault("WEAVE_DISABLED", "true")
+
+TRACE_TASK_ID = "{task_id}"
+TRACE_RUN_ID = "{run_id}"
+TRACE_PROJECT = "{weave_project}"
+TRACE_TASK_ROOT = ""
+
+def _iso(ts: float) -> str:
+    return datetime.utcfromtimestamp(ts).isoformat(timespec="milliseconds") + "Z"
+
+def _trace_path() -> str:
+    override = os.getenv("HAL_LOCAL_TRACE_PATH")
+    if override:
+        return override
+    return os.path.join(TRACE_TASK_ROOT or ".", "local_trace.jsonl")
+
+def _write_trace(entry: dict) -> None:
+    if not TRACE_TASK_ROOT:
+        return
+    try:
+        path = _trace_path()
+        trace_dir = os.path.dirname(path)
+        if trace_dir:
+            os.makedirs(trace_dir, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, default=str) + "\\n")
+    except Exception:
+        pass
+
+def _should_trace_url(url: str) -> bool:
+    text = str(url)
+    return any(token in text for token in (
+        "/chat/completions",
+        "/completions",
+        "/responses",
+        "/v1/messages",
+        "/embeddings",
+    ))
+
+def _parse_json_bytes(payload) -> dict | None:
+    if not payload:
+        return None
+    if isinstance(payload, (bytes, bytearray)):
+        try:
+            payload = payload.decode("utf-8")
+        except Exception:
+            return None
+    if not isinstance(payload, str):
+        return None
+    try:
+        return json.loads(payload)
+    except Exception:
+        return None
+
+def _build_entry(payload: dict | None, output: dict | None, started_at: float, ended_at: float) -> dict:
+    return dict(
+        id=str(uuid.uuid4()),
+        op_name="local.llm_call",
+        display_name="local.llm_call",
+        trace_id=TRACE_RUN_ID,
+        parent_id=None,
+        started_at=_iso(started_at),
+        ended_at=_iso(ended_at),
+        inputs=payload if payload is not None else dict(),
+        output=output if output is not None else dict(),
+        attributes=dict(
+            weave_task_id=TRACE_TASK_ID,
+            trace_source="local",
+            weave_project=TRACE_PROJECT,
+        ),
+        weave_task_id=TRACE_TASK_ID,
+    )
+
+def _maybe_log_httpx(request, response, started_at: float) -> None:
+    if not LOCAL_TRACE_ENABLED:
+        return
+    if request.method.upper() != "POST":
+        return
+    if not _should_trace_url(request.url):
+        return
+    payload = _parse_json_bytes(request.content)
+    if isinstance(payload, dict) and payload.get("stream"):
+        return
+    output = None
+    try:
+        response.read()
+        content_type = (response.headers.get("content-type") or "").lower()
+        if "application/json" in content_type:
+            output = json.loads(response.content.decode("utf-8"))
+    except Exception:
+        output = None
+    _write_trace(_build_entry(payload, output, started_at, time.time()))
+
+async def _maybe_log_httpx_async(request, response, started_at: float) -> None:
+    if not LOCAL_TRACE_ENABLED:
+        return
+    if request.method.upper() != "POST":
+        return
+    if not _should_trace_url(request.url):
+        return
+    payload = _parse_json_bytes(request.content)
+    if isinstance(payload, dict) and payload.get("stream"):
+        return
+    output = None
+    try:
+        await response.aread()
+        content_type = (response.headers.get("content-type") or "").lower()
+        if "application/json" in content_type:
+            output = json.loads(response.content.decode("utf-8"))
+    except Exception:
+        output = None
+    _write_trace(_build_entry(payload, output, started_at, time.time()))
+
+def _maybe_log_requests(request, response, started_at: float) -> None:
+    if not LOCAL_TRACE_ENABLED:
+        return
+    if request.method.upper() != "POST":
+        return
+    if not _should_trace_url(request.url):
+        return
+    payload = _parse_json_bytes(request.body)
+    if isinstance(payload, dict) and payload.get("stream"):
+        return
+    output = None
+    try:
+        content_type = (response.headers.get("content-type") or "").lower()
+        if "application/json" in content_type:
+            output = json.loads(response.content.decode("utf-8"))
+    except Exception:
+        output = None
+    _write_trace(_build_entry(payload, output, started_at, time.time()))
+
+try:
+    import httpx  # type: ignore
+
+    _httpx_send = httpx.Client.send
+    def _trace_send(self, request, *args, **kwargs):
+        started_at = time.time()
+        response = _httpx_send(self, request, *args, **kwargs)
+        _maybe_log_httpx(request, response, started_at)
+        return response
+
+    _httpx_async_send = httpx.AsyncClient.send
+    async def _trace_async_send(self, request, *args, **kwargs):
+        started_at = time.time()
+        response = await _httpx_async_send(self, request, *args, **kwargs)
+        await _maybe_log_httpx_async(request, response, started_at)
+        return response
+
+    httpx.Client.send = _trace_send  # type: ignore[assignment]
+    httpx.AsyncClient.send = _trace_async_send  # type: ignore[assignment]
+except Exception:
+    pass
+
+try:
+    import requests  # type: ignore
+
+    _requests_send = requests.Session.send
+    def _trace_requests_send(self, request, *args, **kwargs):
+        started_at = time.time()
+        response = _requests_send(self, request, *args, **kwargs)
+        _maybe_log_requests(request, response, started_at)
+        return response
+
+    requests.Session.send = _trace_requests_send  # type: ignore[assignment]
+except Exception:
+    pass
 
 def _network_preflight() -> None:
     enabled = (os.getenv("HAL_DOCKER_PREFLIGHT_NETWORK") or "").strip().lower() in ("1", "true", "yes")
@@ -2136,7 +2315,8 @@ try:
         weave_available = True
     except Exception as weave_import_error:
         weave_available = False
-        print(f"Weave import failed, disabling tracing: {{weave_import_error}}")
+        if WEAVE_TRACE_ENABLED:
+            print(f"Weave import failed, disabling tracing: {{weave_import_error}}")
 
     def _try_autopatch() -> None:
         # Best-effort: enable LLM/network instrumentation when available.
@@ -2155,7 +2335,7 @@ try:
             except Exception:
                 pass
 
-    if weave_available:
+    if weave_available and WEAVE_TRACE_ENABLED:
         try:
             _try_autopatch()
             weave.init("{weave_project}")
@@ -2168,6 +2348,7 @@ try:
         weave_enabled = False
     
     task_root = os.getenv("HAL_TASK_DIR", "/workspace")
+    TRACE_TASK_ROOT = task_root
     hal_harness_root = os.getenv("HAL_HARNESS_ROOT", os.path.join(task_root, "hal-harness"))
     agent_root = os.path.join(hal_harness_root, "agents", "{agent_name}")
     for path in (hal_harness_root, agent_root):

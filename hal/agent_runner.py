@@ -13,6 +13,7 @@ from rich.box import ROUNDED
 from .utils.logging_utils import terminal_print
 from .inspect.inspect import is_inspect_benchmark
 from .utils.weave_utils import get_call_ids, delete_calls
+from .utils.trace_utils import get_trace_mode
 class AgentRunner:
     """Handles running agents either locally or on VMs"""
 
@@ -158,12 +159,19 @@ class AgentRunner:
         """Run the full agent evaluation pipeline"""
         
         # Initialize logging for main run
-        print_step("Initializing logging with W&B Weave...")
+        trace_mode = get_trace_mode()
+        os.environ.setdefault("HAL_TRACE_MODE", trace_mode)
         weave_client = None
-        try:
-            weave_client = weave.init(self.run_id)
-        except Exception as exc:
-            print_warning(f"Failed to initialize Weave (continuing without traces): {exc}")
+        if trace_mode in ("weave", "both"):
+            print_step("Initializing logging with W&B Weave...")
+            try:
+                weave_client = weave.init(self.run_id)
+            except Exception as exc:
+                print_warning(f"Failed to initialize Weave (continuing without traces): {exc}")
+        else:
+            print_step("Initializing local trace logging...")
+            os.environ.setdefault("WANDB_MODE", "disabled")
+            os.environ.setdefault("WEAVE_DISABLED", "true")
         
         # Get dataset and filter for remaining tasks if continuing
         dataset = self.benchmark.get_dataset()

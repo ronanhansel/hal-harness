@@ -3,12 +3,14 @@ from typing import Dict, Any, Optional, TypeVar, Generic
 from pydantic import BaseModel, TypeAdapter
 import json
 import os
+import shutil
 import subprocess
 from inspect_ai.log import EvalLog, write_eval_log
 from datetime import datetime
 from ..utils.weave_utils import get_total_cost, get_weave_calls
 from ..utils.logging_utils import print_warning
 from ..utils.utils import make_json_serializable, get_git_info
+from ..utils.trace_utils import collect_local_trace_entries, get_trace_mode, trace_output_dir
 
 
 class BaseBenchmark(ABC):
@@ -91,10 +93,13 @@ class BaseBenchmark(ABC):
                 if isinstance(task_data, dict) and "metrics" in task_data:
                     task_metrics[task_id] = task_data["metrics"]
 
+        trace_mode = get_trace_mode()
+        local_logging = collect_local_trace_entries(run_dir) if trace_mode in ("local", "both") else []
+
         # Get cost and usage metrics
         # Skip slow Weave downloads if HAL_SKIP_WEAVE_DOWNLOAD is set (traces can be fetched later)
         skip_weave_download = os.environ.get("HAL_SKIP_WEAVE_DOWNLOAD", "").strip().lower() in ("1", "true", "yes")
-        if weave_client is not None and not skip_weave_download:
+        if weave_client is not None and trace_mode in ("weave", "both") and not skip_weave_download:
             try:
                 total_cost, total_usage = get_total_cost(weave_client)
             except Exception as exc:
@@ -110,6 +115,11 @@ class BaseBenchmark(ABC):
                 print_warning("Skipping Weave trace download (HAL_SKIP_WEAVE_DOWNLOAD=true). Fetch traces later with merge_traces.py")
             total_cost, total_usage = 0.0, {}
             raw_logging, latency_dict = [], {}
+        if local_logging:
+            if not raw_logging or trace_mode == "local":
+                raw_logging = local_logging
+            elif trace_mode == "both":
+                raw_logging.extend(local_logging)
 
         # Prepare results summary
         results_summary = {
@@ -148,6 +158,13 @@ class BaseBenchmark(ABC):
 
         if upload:
             self.upload_results(run_id, results_summary)
+
+        try:
+            trace_dir = trace_output_dir()
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(upload_path, trace_dir / f"{run_id}_UPLOAD.json")
+        except Exception as exc:
+            print_warning(f"Failed to copy trace to {trace_output_dir()}: {exc}")
 
         return results_summary["results"]
 
