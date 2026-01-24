@@ -31,8 +31,10 @@ def timeout_handler(signum, frame):
 def get_function_output(function_definition, test_case):
     # exec(disable_printing)
     try:
-        exec(function_definition)
-        return eval(test_case)
+        # Use an explicit namespace so eval can see exec-defined symbols.
+        namespace = {}
+        exec(function_definition, namespace, namespace)
+        return eval(test_case, namespace, namespace)
     except Exception as e:
         return None
 
