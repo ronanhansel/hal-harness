@@ -108,7 +108,7 @@ def check_correctness(ground_truth_function, test_function, test_cases):
         test_function = test_function.split("```")[1].split("```")[0]
 
     for test_case in test_cases.values():
-        ground_truth_output = get_function_output(ground_truth_function, test_case)
+        ground_truth_output = subprocess_get_function_output(ground_truth_function, test_case)
 
         # timeout precautions
         signal.signal(signal.SIGALRM, timeout_handler)
@@ -117,14 +117,14 @@ def check_correctness(ground_truth_function, test_function, test_cases):
             # print(test_function)
             # if "match_player" in test_function:
             #     return 0
-            test_output = get_function_output(test_function, test_case)
+            test_output = subprocess_get_function_output(test_function, test_case)
         except TimeoutError:
             test_output = None
         signal.alarm(0)  # Reset the alarm
         try:
             if ground_truth_output == test_output and ground_truth_output is not None:
                 num_correct += 1
-        except ValueError:
+        except Exception:
             pass
     return num_correct / len(test_cases)
 
@@ -163,10 +163,14 @@ def code_evaluate(trajectories):
             all_correctness.append(0)
             continue
 
-        correctness = check_correctness(
-            ground_truth_function, test_function, test_cases
-        )
-        all_correctness.append(correctness)
+        try:
+            correctness = check_correctness(
+                ground_truth_function, test_function, test_cases
+            )
+            all_correctness.append(correctness)
+        except Exception as e:
+            print(f"[code_evaluate] Error evaluating task {i}: {e}. Marking as failed.")
+            all_correctness.append(0)
 
     if skipped > 0:
         print(f"[code_evaluate] WARNING: Skipped {skipped} failed/invalid tasks (counted as 0)")

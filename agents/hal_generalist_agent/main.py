@@ -1397,8 +1397,14 @@ Here is the question and attached files are stored in your current directory:
                 str: The user's response.
                 str: Indication of whether the task is finished.
             """
-            observation, _, _ = isolated_env.step(question)
-            return observation.observation, "Task finished" if observation.done else "You may still continue to work on the task"
+            dialogue, _, done = isolated_env.step(question)
+            response_text = ""
+            if dialogue:
+                for entry in reversed(dialogue):
+                    if entry.get("role") == "user":
+                        response_text = entry.get("content", "")
+                        break
+            return response_text, "Task finished" if done else "You may still continue to work on the task"
         
         @tool 
         def finish_task(answer: str) -> str:
@@ -1469,8 +1475,14 @@ Here is the question and attached files are stored in your current directory:
                 str: The user's response.
                 str: Indication of whether the task is finished.
             """
-            observation, _, _ = isolated_env.step(question)
-            return observation.observation, "Task finished" if observation.done else "You may still continue to work on the task"
+            dialogue, _, done = isolated_env.step(question)
+            response_text = ""
+            if dialogue:
+                for entry in reversed(dialogue):
+                    if entry.get("role") == "user":
+                        response_text = entry.get("content", "")
+                        break
+            return response_text, "Task finished" if done else "You may still continue to work on the task"
         
         @tool 
         def finish_task(answer: str) -> str:

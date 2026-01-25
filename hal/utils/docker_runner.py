@@ -888,6 +888,11 @@ class DockerRunner:
         Verify MSAL refresh token works inside the container when direct Azure is enabled.
         Runs at most once per prepared image tag per process.
         """
+        # DISABLED: This preflight check causes significant delays and hangs when running 
+        # many parallel containers due to network contention and MSAL cache locking.
+        # We will let the agent fail lazily if auth is broken.
+        return
+
         if env_vars.get("USE_DIRECT_AZURE", "").lower() != "true":
             return
 
@@ -1919,7 +1924,7 @@ class DockerRunner:
                                 last_stdout_offset = f.tell()
                             if data:
                                 for line in data.decode(errors="replace").splitlines():
-                                    verbose_logger.debug("[hal][worker][%s][stdout] %s", task_id, line)
+                                    verbose_logger.debug("[task %s] %s", task_id, line)
                         except Exception:
                             pass
                     if stderr_path.exists():
@@ -1930,7 +1935,7 @@ class DockerRunner:
                                 last_stderr_offset = f.tell()
                             if data:
                                 for line in data.decode(errors="replace").splitlines():
-                                    verbose_logger.debug("[hal][worker][%s][stderr] %s", task_id, line)
+                                    verbose_logger.debug("[task %s] %s", task_id, line)
                         except Exception:
                             pass
                     if self._worker_status_logs and status_path.exists():

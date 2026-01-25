@@ -20,6 +20,7 @@ console = Console()
 # Create loggers
 main_logger = logging.getLogger('agent_eval')
 verbose_logger = logging.getLogger('agent_eval.verbose')
+verbose_logger.propagate = False  # Prevent propagation to parent logger to avoid recursion
 
 # Store global paths
 _log_paths = {
