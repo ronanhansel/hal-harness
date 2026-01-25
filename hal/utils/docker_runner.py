@@ -106,6 +106,11 @@ class DockerRunner:
             self.docker_client = docker.DockerClient(base_url=docker_host, timeout=docker_timeout)
         else:
             self.docker_client = docker.from_env(timeout=docker_timeout)
+            
+        # Initialize thread pool for blocking Docker operations
+        # We need enough threads to handle max_concurrent tasks potentially blocking on Docker I/O
+        import concurrent.futures
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(max_concurrent + 10, 50))
         
         # Check if Docker is available
         self._check_docker_available()
@@ -837,7 +842,19 @@ class DockerRunner:
         Verify that baseline reproducibility tools (Rscript/pandoc/TeX) exist in the container image.
         Runs at most once per prepared image tag per process.
         """
+        # 1. Fast Path: Check without lock
+        cached = self._toolchain_preflight_by_image.get(image_tag)
+        if cached is True:
+            return
+        if cached is False:
+            raise RuntimeError(
+                "Container image failed toolchain preflight previously (R/pandoc/TeX missing). "
+                "Rebuild the runner image and force rebuild prepared images."
+            )
+
+        # 2. Slow Path: Acquire lock
         async with self._toolchain_preflight_lock:
+            # 3. Double Check: Did someone else finish while we waited?
             cached = self._toolchain_preflight_by_image.get(image_tag)
             if cached is True:
                 return
@@ -862,7 +879,11 @@ class DockerRunner:
                 "echo '[hal][toolchain] which latexmk:'; (command -v latexmk && latexmk -v | head -n 1) || true; ",
             ]
             try:
-                result = container.exec_run(cmd)
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(
+                    self._executor,
+                    lambda: container.exec_run(cmd)
+                )
                 out = (result.output or b"").decode(errors="replace")
                 verbose_logger.debug("[hal][toolchain] preflight for image=%s exit=%s\n%s", image_tag, result.exit_code, out)
                 if result.exit_code != 0:
@@ -1330,29 +1351,37 @@ class DockerRunner:
             tmpfs = {"/tmp": "size=1G,mode=1777"}
 
             try:
-                container = self.docker_client.containers.run(
-                    image=prepared_image,
-                    name=container_id,
-                    detach=True,
-                    command=["tail", "-f", "/dev/null"],  # Keep container running
-                    environment=env_vars,
-                    network_mode=self.network_mode,
-                    extra_hosts=extra_hosts,
-                    volumes=volumes if volumes else None,
-                    tmpfs=tmpfs,
+                loop = asyncio.get_running_loop()
+                container = await loop.run_in_executor(
+                    self._executor,
+                    lambda: self.docker_client.containers.run(
+                        image=prepared_image,
+                        name=container_id,
+                        detach=True,
+                        command=["tail", "-f", "/dev/null"],  # Keep container running
+                        environment=env_vars,
+                        network_mode=self.network_mode,
+                        extra_hosts=extra_hosts,
+                        volumes=volumes if volumes else None,
+                        tmpfs=tmpfs,
+                    )
                 )
             except docker.errors.APIError as e:
                 # Some Docker engines don't support host-gateway; retry without it.
                 if extra_hosts and "host-gateway" in str(e).lower():
-                    container = self.docker_client.containers.run(
-                        image=prepared_image,
-                        name=container_id,
-                        detach=True,
-                        command=["tail", "-f", "/dev/null"],
-                        environment=env_vars,
-                        network_mode=self.network_mode,
-                        volumes=volumes if volumes else None,
-                        tmpfs=tmpfs,
+                    loop = asyncio.get_running_loop()
+                    container = await loop.run_in_executor(
+                        self._executor,
+                        lambda: self.docker_client.containers.run(
+                            image=prepared_image,
+                            name=container_id,
+                            detach=True,
+                            command=["tail", "-f", "/dev/null"],
+                            environment=env_vars,
+                            network_mode=self.network_mode,
+                            volumes=volumes if volumes else None,
+                            tmpfs=tmpfs,
+                        )
                     )
                 else:
                     raise
@@ -1453,11 +1482,21 @@ class DockerRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await proc.communicate()
-            if stdout:
-                verbose_logger.debug(f"Container {container_id}: {stdout.decode()}")
-            if stderr:
-                verbose_logger.debug(f"Container {container_id}: {stderr.decode()}")        
+
+            async def _stream_log(stream, label):
+                if not stream:
+                    return
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    verbose_logger.debug(f"Container {container_id}: {line.decode(errors='replace').rstrip()}")
+
+            await asyncio.gather(
+                _stream_log(proc.stdout, "stdout"),
+                _stream_log(proc.stderr, "stderr"),
+                proc.wait()
+            )        
             
             # Poll for output.json with timeout
             result = None
