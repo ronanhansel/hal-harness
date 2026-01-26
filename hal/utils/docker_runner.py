@@ -570,29 +570,39 @@ class DockerRunner:
         )
 
         self._active_containers.append(container_id)
-        await self._toolchain_preflight(container, image_tag)
-        await self._azure_token_preflight(container, image_tag, env_vars)
-        if self._worker_mode:
-            worker_path = self._worker_script_path(host_root)
+        try:
+            await self._toolchain_preflight(container, image_tag)
+            await self._azure_token_preflight(container, image_tag, env_vars)
+            if self._worker_mode:
+                worker_path = self._worker_script_path(host_root)
+                try:
+                    worker_cmd = (
+                        "nohup /opt/conda/envs/agent_env/bin/python /workspace/hal_worker.py "
+                        ">/workspace/worker.log 2>&1 &"
+                    )
+                    result = container.exec_run(["bash", "-lc", worker_cmd])
+                    if result.exit_code != 0:
+                        out = (result.output or b"").decode(errors="replace")
+                        raise RuntimeError(out.strip() or f"worker exec failed (exit {result.exit_code})")
+                    ready_path = self._queue_dir(host_root) / "worker.ready"
+                    ready_deadline = time.time() + 10
+                    while time.time() < ready_deadline:
+                        if ready_path.exists():
+                            break
+                        await asyncio.sleep(0.2)
+                    if not ready_path.exists():
+                        raise RuntimeError("worker did not signal ready; check /workspace/worker.log in the container")
+                except Exception as e:
+                    raise RuntimeError(f"Failed to start worker in container {container_id}: {e}") from e
+        except Exception:
             try:
-                worker_cmd = (
-                    "nohup /opt/conda/envs/agent_env/bin/python /workspace/hal_worker.py "
-                    ">/workspace/worker.log 2>&1 &"
-                )
-                result = container.exec_run(["bash", "-lc", worker_cmd])
-                if result.exit_code != 0:
-                    out = (result.output or b"").decode(errors="replace")
-                    raise RuntimeError(out.strip() or f"worker exec failed (exit {result.exit_code})")
-                ready_path = self._queue_dir(host_root) / "worker.ready"
-                ready_deadline = time.time() + 10
-                while time.time() < ready_deadline:
-                    if ready_path.exists():
-                        break
-                    await asyncio.sleep(0.2)
-                if not ready_path.exists():
-                    raise RuntimeError("worker did not signal ready; check /workspace/worker.log in the container")
-            except Exception as e:
-                raise RuntimeError(f"Failed to start worker in container {container_id}: {e}") from e
+                container.remove(force=True)
+            except Exception:
+                pass
+            if container_id in self._active_containers:
+                self._active_containers.remove(container_id)
+            raise
+            
         return _ContainerLease(container_id=container_id, host_root=host_root)
 
     async def _ensure_container_pool(self, prepared_image: str, agent_dir: str) -> None:
@@ -653,6 +663,10 @@ class DockerRunner:
                 raise docker.errors.NotFound("container not running")
             return lease
         except Exception:
+            try:
+                self.docker_client.containers.get(lease.container_id).remove(force=True)
+            except Exception:
+                pass
             try:
                 if lease.container_id in self._active_containers:
                     self._active_containers.remove(lease.container_id)
