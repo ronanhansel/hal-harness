@@ -1627,7 +1627,7 @@ class DockerRunner:
                              agent_dir: str,
                              agent_args: Dict[str, Any],
                              run_id: str,
-                             timeout: int = 7200,
+                             timeout: int = 18000,
                              env_override: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
         """Process a single task using a pooled Docker container"""
         if self._worker_mode:
@@ -1859,7 +1859,7 @@ class DockerRunner:
                              agent_dir: str,
                              agent_args: Dict[str, Any],
                              run_id: str,
-                             timeout: int = 7200,
+                             timeout: int = 18000,
                              env_override: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
         """Process a single task using the pooled in-container worker."""
         lease = await self._acquire_pool_container()

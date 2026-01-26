@@ -61,7 +61,7 @@ class VMRunner:
                        benchmark: Optional[BaseBenchmark] = None,
                        progress: Optional[Progress] = None,
                        task: Optional[TaskID] = None,
-                       timeout: int = 7200) -> Dict[str, Any]:
+                       timeout: int = 18000) -> Dict[str, Any]:
         """Run agent on all tasks using Azure VMs"""
         self.benchmark = benchmark
         results = {}
