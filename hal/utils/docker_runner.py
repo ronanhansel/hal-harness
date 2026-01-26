@@ -1228,6 +1228,15 @@ class DockerRunner:
         """Process a single task with semaphore control"""
         async with self._semaphore:
             verbose_logger.debug(f"Starting task {task_id} (active tasks: {self.max_concurrent - self._semaphore._value})")
+            
+            # Extract timeout from agent_args if present
+            timeout = 7200
+            if agent_args and 'timeout' in agent_args:
+                try:
+                    timeout = int(agent_args['timeout'])
+                except (ValueError, TypeError):
+                    verbose_logger.debug(f"Invalid timeout value in agent_args: {agent_args['timeout']}, using default")
+
             result = await self._run_single_task(
                 task_id=task_id,
                 input_data=input_data,
@@ -1235,6 +1244,7 @@ class DockerRunner:
                 agent_dir=agent_dir,
                 agent_args=agent_args,
                 run_id=run_id,
+                timeout=timeout,
                 env_override=env_override
             )
             
