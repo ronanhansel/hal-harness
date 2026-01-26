@@ -58,60 +58,153 @@ except ImportError:
     class MSALTokenProvider:
         """
         Token provider that reloads MSAL cache on EVERY call for automatic refresh.
-        This is critical for long-running Docker containers where tokens expire after ~1 hour.
+        Uses shared locks for reading to support high parallelism.
         """
         AZURE_CLI_CLIENT_ID = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'
         MICROSOFT_TENANT_ID = '72f988bf-86f1-41af-91ab-2d7cd011db47'
 
         def __init__(self, scope: str = 'api://trapi/.default'):
+            import msal
             self.scope = scope
             self.cache_path = os.path.expanduser('~/.azure/msal_token_cache.json')
             self._refresh_count = 0
+            self._lock_held = False
+            self.cache = msal.SerializableTokenCache()
+            self.app = msal.PublicClientApplication(
+                self.AZURE_CLI_CLIENT_ID,
+                authority=f'https://login.microsoftonline.com/{self.MICROSOFT_TENANT_ID}',
+                token_cache=self.cache,
+            )
+            self._load_cache()
+
+        def _load_cache(self):
+            """Load the MSAL cache from disk. Returns True if loaded."""
+            if not os.path.exists(self.cache_path):
+                return False
+            
+            if self._lock_held:
+                try:
+                    with open(self.cache_path, 'r') as f:
+                        self.cache.deserialize(f.read())
+                    return True
+                except Exception:
+                    return False
+
+            lock_path = self.cache_path + ".lock"
+            try:
+                import fcntl
+                with open(lock_path, 'a+') as lock_file:
+                    fcntl.flock(lock_file, fcntl.LOCK_SH)
+                    try:
+                        with open(self.cache_path, 'r') as f:
+                            self.cache.deserialize(f.read())
+                        return True
+                    finally:
+                        fcntl.flock(lock_file, fcntl.LOCK_UN)
+            except Exception as e:
+                print(f"[MSALTokenProvider] Failed to load cache: {e}")
+                return False
+
+        def _save_cache(self) -> None:
+            """Save the MSAL cache to disk if it has changed."""
+            if self.cache.has_state_changed:
+                if self._lock_held:
+                    try:
+                        with open(self.cache_path, 'w') as f:
+                            f.write(self.cache.serialize())
+                        return
+                    except Exception:
+                        return
+
+                lock_path = self.cache_path + ".lock"
+                try:
+                    import fcntl
+                    with open(lock_path, 'a+') as lock_file:
+                        fcntl.flock(lock_file, fcntl.LOCK_EX)
+                        try:
+                            with open(self.cache_path, 'w') as f:
+                                f.write(self.cache.serialize())
+                        finally:
+                            fcntl.flock(lock_file, fcntl.LOCK_UN)
+                except Exception as e:
+                    print(f"[MSALTokenProvider] Warning: Could not persist cache: {e}")
+
+        def _find_valid_at_in_cache(self, accounts):
+            import time
+            import msal
+            now = time.time() + 300
+            for account in accounts:
+                try:
+                    for token in self.cache.find(msal.TokenCache.CredentialType.ACCESS_TOKEN, 
+                                               query={"home_account_id": account["home_account_id"]}):
+                        if self.scope in token.get("target", ""):
+                            expires_on = int(token.get("expires_on", 0))
+                            if expires_on > now:
+                                return token.get("secret")
+                except Exception:
+                    pass
+            return None
 
         def __call__(self) -> str:
             """Get token, reloading cache from disk each time for fresh tokens."""
             import msal
+            import fcntl
+            import time
 
-            if not os.path.exists(self.cache_path):
-                raise RuntimeError(f"MSAL cache not found at {self.cache_path}")
+            accounts = self.app.get_accounts()
+            if not accounts and os.path.exists(self.cache_path):
+                 self._load_cache()
+                 accounts = self.app.get_accounts()
 
-            # CRITICAL: Reload cache from disk on EVERY call
-            # This picks up tokens refreshed by other processes or the host
-            cache = msal.SerializableTokenCache()
-            with open(self.cache_path, 'r') as f:
-                cache.deserialize(f.read())
-
-            app = msal.PublicClientApplication(
-                self.AZURE_CLI_CLIENT_ID,
-                authority=f'https://login.microsoftonline.com/{self.MICROSOFT_TENANT_ID}',
-                token_cache=cache,
-            )
-
-            accounts = app.get_accounts()
             if not accounts:
-                raise RuntimeError("No accounts found in MSAL cache. Run 'az login' first.")
+                if not os.path.exists(self.cache_path):
+                     raise RuntimeError(f"MSAL cache not found at {self.cache_path}")
 
-            # Try ALL accounts - different accounts may have tokens for different scopes
-            last_error = None
-            for account in accounts:
-                result = app.acquire_token_silent([self.scope], account=account)
-                if result and 'access_token' in result:
-                    # CRITICAL: Persist cache after token refresh
-                    if cache.has_state_changed:
-                        try:
-                            with open(self.cache_path, 'w') as f:
-                                f.write(cache.serialize())
-                        except Exception as e:
-                            print(f"[MSALTokenProvider] Warning: Could not persist cache: {e}")
+            # 1. Fast Path
+            token = self._find_valid_at_in_cache(accounts)
+            if token:
+                return token
 
-                    self._refresh_count += 1
-                    if self._refresh_count == 1 or self._refresh_count % 100 == 0:
-                        print(f"[MSALTokenProvider] Token acquired (refresh #{self._refresh_count})")
-                    return result['access_token']
-                else:
-                    last_error = result.get('error_description', 'Unknown error') if result else 'No token'
+            print(f"[MSALTokenProvider] Fast path miss - waiting for lock...")
+            start_wait = time.time()
+            
+            # 2. Slow Path
+            lock_path = self.cache_path + ".lock"
+            with open(lock_path, 'a+') as lock_file:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                self._lock_held = True
+                try:
+                    wait_time = time.time() - start_wait
+                    if wait_time > 1.0:
+                        print(f"[MSALTokenProvider] Lock acquired (waited {wait_time:.2f}s)")
+                    
+                    self._load_cache()
+                    accounts = self.app.get_accounts()
+                    
+                    if not accounts:
+                        raise RuntimeError("No accounts found in MSAL cache. Run 'az login' first.")
 
-            raise RuntimeError(f"Token acquisition failed for all accounts. Last error: {last_error}")
+                    token = self._find_valid_at_in_cache(accounts)
+                    if token:
+                        print(f"[MSALTokenProvider] Token found after reload")
+                        return token
+
+                    # 3. Actually refresh
+                    last_error = None
+                    for account in accounts:
+                        result = self.app.acquire_token_silent([self.scope], account=account)
+                        if result and 'access_token' in result:
+                            self._save_cache()
+                            self._refresh_count += 1
+                            print(f"[MSALTokenProvider] Token acquired (refresh #{self._refresh_count})")
+                            return result['access_token']
+                        if result:
+                            last_error = result.get('error_description', 'unknown')
+                    
+                    raise RuntimeError(f"Token acquisition failed: {last_error}")
+                finally:
+                    self._lock_held = False
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
 
     def get_trapi_client():
         """Fallback TRAPI client creation with proper token refresh."""

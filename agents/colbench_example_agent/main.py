@@ -98,6 +98,7 @@ except ImportError:
         """
         Token provider that reloads MSAL cache on EVERY call for automatic refresh.
         This is critical for long-running Docker containers where tokens expire after ~1 hour.
+        Uses shared locks for reading to support high parallelism.
         """
         AZURE_CLI_CLIENT_ID = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'
         MICROSOFT_TENANT_ID = '72f988bf-86f1-41af-91ab-2d7cd011db47'
@@ -107,6 +108,7 @@ except ImportError:
             self.scope = scope
             self.cache_path = os.path.expanduser('~/.azure/msal_token_cache.json')
             self._refresh_count = 0
+            self._lock_held = False
             self.cache = msal.SerializableTokenCache()
             self.app = msal.PublicClientApplication(
                 self.AZURE_CLI_CLIENT_ID,
@@ -120,11 +122,19 @@ except ImportError:
             if not os.path.exists(self.cache_path):
                 return False
             
+            if self._lock_held:
+                try:
+                    with open(self.cache_path, 'r') as f:
+                        self.cache.deserialize(f.read())
+                    return True
+                except Exception:
+                    return False
+
             lock_path = self.cache_path + ".lock"
             try:
                 import fcntl
                 with open(lock_path, 'a+') as lock_file:
-                    fcntl.flock(lock_file, fcntl.LOCK_EX)
+                    fcntl.flock(lock_file, fcntl.LOCK_SH)
                     try:
                         with open(self.cache_path, 'r') as f:
                             self.cache.deserialize(f.read())
@@ -138,6 +148,14 @@ except ImportError:
         def _save_cache(self) -> None:
             """Save the MSAL cache to disk if it has changed."""
             if self.cache.has_state_changed:
+                if self._lock_held:
+                    try:
+                        with open(self.cache_path, 'w') as f:
+                            f.write(self.cache.serialize())
+                        return
+                    except Exception:
+                        return
+
                 lock_path = self.cache_path + ".lock"
                 try:
                     import fcntl
@@ -195,13 +213,16 @@ except ImportError:
             lock_path = self.cache_path + ".lock"
             with open(lock_path, 'a+') as lock_file:
                 fcntl.flock(lock_file, fcntl.LOCK_EX)
-                wait_time = time.time() - start_wait
-                if wait_time > 1.0:
-                    print(f"[MSALTokenProvider] Lock acquired (waited {wait_time:.2f}s)")
-                
+                self._lock_held = True
                 try:
+                    wait_time = time.time() - start_wait
+                    if wait_time > 1.0:
+                        print(f"[MSALTokenProvider] Lock acquired (waited {wait_time:.2f}s)")
+                    
+                    # Reload again inside lock
                     self._load_cache()
                     accounts = self.app.get_accounts()
+                    
                     if not accounts:
                         raise RuntimeError("No accounts found in MSAL cache. Run 'az login' first.")
 
@@ -210,22 +231,21 @@ except ImportError:
                         print(f"[MSALTokenProvider] Token found after reload")
                         return token
 
-                    # 3. Refresh Action
+                    # 3. Actually refresh
                     last_error = None
                     for account in accounts:
                         result = self.app.acquire_token_silent([self.scope], account=account)
                         if result and 'access_token' in result:
                             self._save_cache()
                             self._refresh_count += 1
-                            if self._refresh_count == 1 or self._refresh_count % 100 == 0:
-                                print(f"[MSALTokenProvider] Token acquired (refresh #{self._refresh_count})")
+                            print(f"[MSALTokenProvider] Token acquired (refresh #{self._refresh_count})")
                             return result['access_token']
-                        else:
-                            last_error = result.get('error_description', 'Unknown error') if result else 'No token'
-
-                    raise RuntimeError(f"Token acquisition failed for all accounts. Last error: {last_error}")
-
+                        if result:
+                            last_error = result.get('error_description', 'unknown')
+                    
+                    raise RuntimeError(f"Token acquisition failed: {last_error}")
                 finally:
+                    self._lock_held = False
                     fcntl.flock(lock_file, fcntl.LOCK_UN)
 
     def get_trapi_client():
@@ -243,26 +263,35 @@ except ImportError:
         timeout = float(os.environ.get('TRAPI_TIMEOUT', 1800))
 
         # Method 1: MSAL token provider (REQUIRED - supports automatic refresh)
-        # Critical for long-running benchmarks (3-4+ hours)
         try:
             import msal
             cache_path = os.path.expanduser('~/.azure/msal_token_cache.json')
             if os.path.exists(cache_path):
                 token_provider = MSALTokenProvider(scope=scope)
-                # Test it works
-                token_provider()
-                print(f"[colbench_agent] Using MSAL token provider (auto-refresh enabled for long-running tasks)")
-                return AzureOpenAI(
-                    azure_endpoint=endpoint,
-                    azure_ad_token_provider=token_provider,
-                    api_version=api_version,
-                    max_retries=max_retries,
-                    timeout=timeout,
-                )
+                
+                # Test if token is valid (preflight)
+                # Skip if requested via env var to reduce overhead for 400+ parallel processes
+                if os.environ.get("HAL_SKIP_MSAL_PREFLIGHT", "").lower() == "true":
+                    print(f"[colbench_agent] Using MSAL token provider (lazy mode)")
+                    return AzureOpenAI(
+                        azure_endpoint=endpoint,
+                        azure_ad_token_provider=token_provider,
+                        api_version=api_version,
+                        max_retries=max_retries,
+                        timeout=timeout,
+                    )
+                
+                test_token = token_provider()
+                if test_token:
+                    print(f"[colbench_agent] Using MSAL token provider (auto-refresh enabled for long-running tasks)")
+                    return AzureOpenAI(
+                        azure_endpoint=endpoint,
+                        azure_ad_token_provider=token_provider,
+                        api_version=api_version,
+                        max_retries=max_retries,
+                        timeout=timeout,
+                    )
         except ImportError:
-            print(f"[colbench_agent] MSAL not available, trying Azure Identity")
-        except Exception as e:
-            print(f"[colbench_agent] MSAL token provider failed: {e}")
 
         # Method 2: Azure Identity (fallback - also supports token refresh)
         try:

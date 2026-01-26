@@ -177,6 +177,7 @@ class MSALTokenProvider:
     2. Persists the cache after acquiring new tokens (keeps refresh tokens fresh)
     3. Handles token refresh failures gracefully with detailed logging
     4. Supports automatic retry for transient failures
+    5. Uses shared locks for reading to support high parallelism (e.g. 400+ processes)
     """
 
     def __init__(self, scope: str = 'api://trapi/.default'):
@@ -184,6 +185,7 @@ class MSALTokenProvider:
         self.cache_path = os.path.expanduser('~/.azure/msal_token_cache.json')
         self._last_token_time = None
         self._token_refresh_count = 0
+        self._lock_held = False  # Track if we already hold an exclusive lock
         self.cache = msal.SerializableTokenCache()
         # Initialize app once (will rely on cache updates)
         self.app = msal.PublicClientApplication(
@@ -201,11 +203,22 @@ class MSALTokenProvider:
         if not os.path.exists(self.cache_path):
             return False
         
+        # If we already hold an exclusive lock from __call__, we can just read
+        if self._lock_held:
+            try:
+                with open(self.cache_path, 'r') as f:
+                    self.cache.deserialize(f.read())
+                return True
+            except Exception as e:
+                print(f"[MSALTokenProvider] Failed to read cache while locked: {e}")
+                return False
+
         lock_path = self.cache_path + ".lock"
         try:
             import fcntl
             with open(lock_path, 'a+') as lock_file:
-                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                # Use SHARED lock for reading to allow parallel processes to load cache simultaneously
+                fcntl.flock(lock_file, fcntl.LOCK_SH)
                 try:
                     with open(self.cache_path, 'r') as f:
                         self.cache.deserialize(f.read())
@@ -219,6 +232,17 @@ class MSALTokenProvider:
     def _save_cache(self) -> None:
         """Save the MSAL cache to disk if it has changed."""
         if self.cache.has_state_changed:
+            # If we already hold an exclusive lock from __call__, we can just write
+            if self._lock_held:
+                try:
+                    with open(self.cache_path, 'w') as f:
+                        f.write(self.cache.serialize())
+                    print(f"[MSALTokenProvider] Cache persisted to disk")
+                    return
+                except Exception as e:
+                    print(f"[MSALTokenProvider] Failed to save cache while locked: {e}")
+                    return
+
             lock_path = self.cache_path + ".lock"
             try:
                 import fcntl
@@ -243,24 +267,8 @@ class MSALTokenProvider:
         now = time.time() + 300
         
         for account in accounts:
-            # We can't easily query the cache object directly without private APIs or 
-            # reimplementing cache keys. However, acquire_token_silent usually checks 
-            # AT validity first. 
-            # The safest way is to trust acquire_token_silent BUT we must ensure 
-            # we don't accidentally use the RT if AT is expired.
-            # Since we can't disable RT usage in acquire_token_silent, we must rely
-            # on the lock in the slow path.
-            # For the fast path, we need to know if we HAVE a valid token.
-            # We will use acquire_token_silent. If it returns a token and 
-            # !cache.has_state_changed, it was an in-memory hit (valid AT).
-            # If cache.has_state_changed, it used the RT, and we are in a RACE condition
-            # if we didn't hold the lock. This is risky.
-            
-            # Better approach: Iterate tokens in cache matching the scope/account
             try:
                 # This depends on MSAL internals structure which is stable enough
-                # cache.find(CredentialType.ACCESS_TOKEN, ...)
-                # But simplify: iterate all access tokens
                 for token in self.cache.find(msal.TokenCache.CredentialType.ACCESS_TOKEN, 
                                            query={"home_account_id": account["home_account_id"]}):
                     if self.scope in token.get("target", ""):
@@ -304,7 +312,11 @@ class MSALTokenProvider:
         # 2. Slow Path: Lock, Reload, Check, Act
         lock_path = self.cache_path + ".lock"
         with open(lock_path, 'a+') as lock_file:
+            # Wait for exclusive lock to perform refresh
+            # We use a blocking flock, but we could use a loop with timeout if needed
             fcntl.flock(lock_file, fcntl.LOCK_EX)
+            self._lock_held = True
+            
             wait_time = time.time() - start_wait
             if wait_time > 1.0:
                 print(f"[MSALTokenProvider] Lock acquired (waited {wait_time:.2f}s)")
@@ -328,6 +340,7 @@ class MSALTokenProvider:
                 # Now safe to use acquire_token_silent which might use RT
                 last_error = None
                 for account in accounts:
+                    # msal's acquire_token_silent will refresh if AT is expired but RT is valid
                     result = self.app.acquire_token_silent([self.scope], account=account)
                     
                     if result and 'access_token' in result:
@@ -346,16 +359,19 @@ class MSALTokenProvider:
                 raise RuntimeError(f"Token acquisition failed for all accounts. Last error: {last_error}")
 
             finally:
+                self._lock_held = False
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
-def _get_msal_token_provider(scope: str) -> Optional[Callable[[], str]]:
+def _get_msal_token_provider(scope: str, skip_test: bool = False) -> Optional[Callable[[], str]]:
     """
     Create a token provider using MSAL cache.
     Works in Docker containers without requiring az CLI.
 
-    Returns a callable that gets fresh tokens on each call, with
-    automatic refresh and cache persistence.
+    Args:
+        scope: The OAuth scope
+        skip_test: If True, skips the initial "preflight" token acquisition test.
+                  Useful for reducing overhead when launching many processes.
     """
     if not MSAL_AVAILABLE:
         print("[azure_utils] MSAL not available - install msal package")
@@ -370,7 +386,11 @@ def _get_msal_token_provider(scope: str) -> Optional[Callable[[], str]]:
         # Create the token provider
         provider = MSALTokenProvider(scope=scope)
 
-        # Test that it works
+        if skip_test:
+            print(f"[azure_utils] MSAL token provider initialized (lazy mode)")
+            return provider
+
+        # Test that it works (preflight)
         test_token = provider()
         if test_token:
             print(f"[azure_utils] MSAL token provider initialized successfully")
@@ -418,7 +438,8 @@ def get_trapi_client(
     # MSAL can refresh tokens automatically using the refresh token in the cache
     # This is critical for long-running benchmarks (3-4+ hours)
     direct_required = os.environ.get("USE_DIRECT_AZURE", "").lower() == "true"
-    msal_provider = _get_msal_token_provider(scope)
+    skip_test = os.environ.get("HAL_SKIP_MSAL_PREFLIGHT", "").lower() == "true"
+    msal_provider = _get_msal_token_provider(scope, skip_test=skip_test)
     if msal_provider:
         print(f"[azure_utils] Using MSAL token provider (auto-refresh enabled for long-running tasks)")
         print(f"[azure_utils] Retry config: max_retries={max_retries}, timeout={timeout}s")
@@ -496,7 +517,8 @@ def get_azure_client(
     # Method 1: MSAL token provider (REQUIRED for direct Azure mode)
     # Critical for long-running benchmarks (3-4+ hours)
     direct_required = os.environ.get("USE_DIRECT_AZURE", "").lower() == "true"
-    msal_provider = _get_msal_token_provider(scope)
+    skip_test = os.environ.get("HAL_SKIP_MSAL_PREFLIGHT", "").lower() == "true"
+    msal_provider = _get_msal_token_provider(scope, skip_test=skip_test)
     if msal_provider:
         print(f"[azure_utils] Using MSAL token provider for Azure client (auto-refresh enabled)")
         return AzureOpenAI(
