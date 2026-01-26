@@ -430,8 +430,30 @@ def _run_task_impl(input: dict[str, dict], **kwargs) -> dict[str, str]:
 
     # Environment client - always use TRAPI for stability
     if use_trapi:
-        env_client = get_trapi_client()
-        env_model_name = get_trapi_deployment("gpt-4o")
+        # Load balancing for GPT-4o human simulator
+        import random
+        gpt_4o_1120_endpoints = [
+            {
+                "base_url": "https://trapi.research.microsoft.com/gcr/shared",
+                "api_version": "2024-10-21"
+            },
+            {
+                "base_url": "https://trapi.research.microsoft.com/msra/shared",
+                "api_version": "2024-10-21"
+            },
+            {
+                "base_url": "https://trapi.research.microsoft.com/redmond/interactive",
+                "api_version": "2024-10-21"
+            }
+        ]
+        selected_endpoint = random.choice(gpt_4o_1120_endpoints)
+        print(f"[colbench_agent] Load balancing human simulator to: {selected_endpoint['base_url']}")
+
+        env_client = get_trapi_client(
+            endpoint=selected_endpoint["base_url"],
+            api_version=selected_endpoint["api_version"]
+        )
+        env_model_name = "gpt-4o_2024-11-20"
     else:
         env_client = OpenAI()
         env_model_name = "gpt-4o-2024-08-06"
@@ -439,7 +461,13 @@ def _run_task_impl(input: dict[str, dict], **kwargs) -> dict[str, str]:
     # Agent client - use TRAPI for GPT/O-series models
     if "gpt" in kwargs['model_name'].lower() or "o3" in kwargs['model_name'].lower() or "o4-mini" in kwargs['model_name'].lower():
         if use_trapi:
-            agent_client = get_trapi_client()
+            if 'available_base_urls' in kwargs and isinstance(kwargs['available_base_urls'], list):
+                import random
+                selected_agent_url = random.choice(kwargs['available_base_urls'])
+                print(f"[colbench_agent] Load balancing agent to: {selected_agent_url}")
+                agent_client = get_trapi_client(endpoint=selected_agent_url)
+            else:
+                agent_client = get_trapi_client()
         else:
             agent_client = OpenAI()
     elif kwargs['model_name'] == "claude-3-7-sonnet-20250219":
@@ -453,7 +481,13 @@ def _run_task_impl(input: dict[str, dict], **kwargs) -> dict[str, str]:
     else:
         # Default to TRAPI for all other models (including DeepSeek)
         if use_trapi:
-            agent_client = get_trapi_client()
+            if 'available_base_urls' in kwargs and isinstance(kwargs['available_base_urls'], list):
+                import random
+                selected_agent_url = random.choice(kwargs['available_base_urls'])
+                print(f"[colbench_agent] Load balancing agent (default) to: {selected_agent_url}")
+                agent_client = get_trapi_client(endpoint=selected_agent_url)
+            else:
+                agent_client = get_trapi_client()
         else:
             agent_client = OpenAI()
 
