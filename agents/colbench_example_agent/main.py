@@ -292,6 +292,7 @@ except ImportError:
                         timeout=timeout,
                     )
         except ImportError:
+            pass
 
         # Method 2: Azure Identity (fallback - also supports token refresh)
         try:
