@@ -73,10 +73,11 @@ def subprocess_get_function_output(function_definition, test_case):
     )
     process.start()
     process.join(timeout=1)
-    process.kill()
-    # except TimeoutError:
-    #     return None
-    # process.terminate()
+
+    if process.is_alive():
+        process.kill()
+        process.join()  # Reap the zombie
+
     try:
         result = queue.get(timeout=0.1)
     except Empty:
@@ -110,17 +111,9 @@ def check_correctness(ground_truth_function, test_function, test_cases):
     for test_case in test_cases.values():
         ground_truth_output = subprocess_get_function_output(ground_truth_function, test_case)
 
-        # timeout precautions
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(1)  # Set an alarm for 10 seconds
-        try:
-            # print(test_function)
-            # if "match_player" in test_function:
-            #     return 0
-            test_output = subprocess_get_function_output(test_function, test_case)
-        except TimeoutError:
-            test_output = None
-        signal.alarm(0)  # Reset the alarm
+        # Timeout is handled internally by subprocess_get_function_output
+        test_output = subprocess_get_function_output(test_function, test_case)
+        
         try:
             if ground_truth_output == test_output and ground_truth_output is not None:
                 num_correct += 1
@@ -132,26 +125,24 @@ def check_correctness(ground_truth_function, test_function, test_cases):
 def code_evaluate(trajectories):
     all_correctness = []
     skipped = 0
-    for i, trajectory in enumerate(trajectories):
+    
+    from concurrent.futures import ThreadPoolExecutor
+
+    def evaluate_single_trajectory(item):
+        i, trajectory = item
         # Skip failed tasks (returned as error strings instead of dicts)
         if not isinstance(trajectory, dict):
             print(f"[code_evaluate] Skipping task {i}: not a dict (likely failed task)")
-            skipped += 1
-            all_correctness.append(0)
-            continue
+            return 0, True
 
         # Check required fields exist
         if "task" not in trajectory or "answer" not in trajectory:
             print(f"[code_evaluate] Skipping task {i}: missing 'task' or 'answer' field")
-            skipped += 1
-            all_correctness.append(0)
-            continue
+            return 0, True
 
         if not isinstance(trajectory["task"], dict):
             print(f"[code_evaluate] Skipping task {i}: 'task' is not a dict")
-            skipped += 1
-            all_correctness.append(0)
-            continue
+            return 0, True
 
         ground_truth_function = trajectory["task"].get("ground_truth")
         test_function = trajectory["answer"]
@@ -159,18 +150,24 @@ def code_evaluate(trajectories):
 
         if not ground_truth_function or not test_cases:
             print(f"[code_evaluate] Skipping task {i}: missing ground_truth or test_cases")
-            skipped += 1
-            all_correctness.append(0)
-            continue
+            return 0, True
 
         try:
             correctness = check_correctness(
                 ground_truth_function, test_function, test_cases
             )
-            all_correctness.append(correctness)
+            return correctness, False
         except Exception as e:
             print(f"[code_evaluate] Error evaluating task {i}: {e}. Marking as failed.")
-            all_correctness.append(0)
+            return 0, False
+
+    with ThreadPoolExecutor(max_workers=32) as executor:
+        results = list(executor.map(evaluate_single_trajectory, enumerate(trajectories)))
+
+    for correctness, is_skipped in results:
+        all_correctness.append(correctness)
+        if is_skipped:
+            skipped += 1
 
     if skipped > 0:
         print(f"[code_evaluate] WARNING: Skipped {skipped} failed/invalid tasks (counted as 0)")
