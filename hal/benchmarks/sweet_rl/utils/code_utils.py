@@ -126,7 +126,13 @@ def code_evaluate(trajectories):
     all_correctness = []
     skipped = 0
     
+    import os
     from concurrent.futures import ThreadPoolExecutor
+
+    # Use more workers on high-core machines to fully utilize CPU.
+    # Each worker evaluates one trajectory and spawns subprocesses for test cases.
+    cpu_count = os.cpu_count() or 32
+    max_workers = min(len(trajectories), cpu_count)
 
     def evaluate_single_trajectory(item):
         i, trajectory = item
@@ -161,7 +167,7 @@ def code_evaluate(trajectories):
             print(f"[code_evaluate] Error evaluating task {i}: {e}. Marking as failed.")
             return 0, False
 
-    with ThreadPoolExecutor(max_workers=32) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         results = list(executor.map(evaluate_single_trajectory, enumerate(trajectories)))
 
     for correctness, is_skipped in results:

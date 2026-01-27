@@ -557,16 +557,20 @@ class DockerRunner:
         volumes = dict(volumes_base)
         volumes[str(host_root)] = {"bind": "/workspace", "mode": "rw"}
 
-        container = self.docker_client.containers.run(
-            image=image_tag,
-            name=container_id,
-            detach=True,
-            command=["tail", "-f", "/dev/null"],
-            environment=env_vars,
-            network_mode=self.network_mode,
-            extra_hosts=extra_hosts,
-            volumes=volumes if volumes else None,
-            tmpfs=tmpfs,
+        loop = asyncio.get_running_loop()
+        container = await loop.run_in_executor(
+            self._executor,
+            lambda: self.docker_client.containers.run(
+                image=image_tag,
+                name=container_id,
+                detach=True,
+                command=["tail", "-f", "/dev/null"],
+                environment=env_vars,
+                network_mode=self.network_mode,
+                extra_hosts=extra_hosts,
+                volumes=volumes if volumes else None,
+                tmpfs=tmpfs,
+            )
         )
 
         self._active_containers.append(container_id)
@@ -580,7 +584,10 @@ class DockerRunner:
                         "nohup /opt/conda/envs/agent_env/bin/python /workspace/hal_worker.py "
                         ">/workspace/worker.log 2>&1 &"
                     )
-                    result = container.exec_run(["bash", "-lc", worker_cmd])
+                    result = await loop.run_in_executor(
+                        self._executor, 
+                        lambda: container.exec_run(["bash", "-lc", worker_cmd])
+                    )
                     if result.exit_code != 0:
                         out = (result.output or b"").decode(errors="replace")
                         raise RuntimeError(out.strip() or f"worker exec failed (exit {result.exit_code})")
@@ -596,7 +603,7 @@ class DockerRunner:
                     raise RuntimeError(f"Failed to start worker in container {container_id}: {e}") from e
         except Exception:
             try:
-                container.remove(force=True)
+                await loop.run_in_executor(self._executor, lambda: container.remove(force=True))
             except Exception:
                 pass
             if container_id in self._active_containers:
@@ -634,19 +641,33 @@ class DockerRunner:
             pool = asyncio.Queue()
             self._pool_leases = []
             agent_dir_path = Path(agent_dir).resolve()
-
-            for _ in range(self._pool_size()):
+            
+            async def _setup_and_start_container():
                 pool_root = self._pool_root_dir()
                 pool_root.mkdir(parents=True, exist_ok=True)
-                host_root = Path(tempfile.mkdtemp(prefix="hal_docker_pool_", dir=pool_root))
-                (host_root / "task").mkdir(parents=True, exist_ok=True)
-                self._queue_dir(host_root).mkdir(parents=True, exist_ok=True)
-                self._staging_root(host_root).mkdir(parents=True, exist_ok=True)
-                worker_path = self._worker_script_path(host_root)
-                if self._worker_mode:
-                    worker_path.write_text(self._create_worker_script(), encoding="utf-8")
-                self._seed_shared_workspace(host_root, agent_dir_path)
-                lease = await self._start_pool_container(host_root)
+                
+                loop = asyncio.get_running_loop()
+                
+                # Perform blocking file operations in executor
+                def _setup_files():
+                    host_root = Path(tempfile.mkdtemp(prefix="hal_docker_pool_", dir=pool_root))
+                    (host_root / "task").mkdir(parents=True, exist_ok=True)
+                    self._queue_dir(host_root).mkdir(parents=True, exist_ok=True)
+                    self._staging_root(host_root).mkdir(parents=True, exist_ok=True)
+                    worker_path = self._worker_script_path(host_root)
+                    if self._worker_mode:
+                        worker_path.write_text(self._create_worker_script(), encoding="utf-8")
+                    self._seed_shared_workspace(host_root, agent_dir_path)
+                    return host_root
+                
+                host_root = await loop.run_in_executor(self._executor, _setup_files)
+                return await self._start_pool_container(host_root)
+
+            # Start containers in parallel
+            tasks = [_setup_and_start_container() for _ in range(self._pool_size())]
+            leases = await asyncio.gather(*tasks)
+
+            for lease in leases:
                 await pool.put(lease)
                 self._pool_leases.append(lease)
 
