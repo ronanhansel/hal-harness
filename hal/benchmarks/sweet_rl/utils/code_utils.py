@@ -167,8 +167,9 @@ def code_evaluate(trajectories):
             print(f"[code_evaluate] Error evaluating task {i}: {e}. Marking as failed.")
             return 0, False
 
+    from tqdm import tqdm
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        results = list(executor.map(evaluate_single_trajectory, enumerate(trajectories)))
+        results = list(tqdm(executor.map(evaluate_single_trajectory, enumerate(trajectories)), total=len(trajectories), desc="Evaluating"))
 
     for correctness, is_skipped in results:
         all_correctness.append(correctness)
