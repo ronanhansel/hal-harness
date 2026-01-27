@@ -156,7 +156,15 @@ class AgentRunner:
             return dataset
 
     async def run(self, agent_name: str, upload: bool = False) -> Dict[str, Any]:
-        """Run the full agent evaluation pipeline"""
+        """Run the full agent evaluation pipeline (wrapper for cleanup)"""
+        try:
+            return await self._run_impl(agent_name, upload)
+        finally:
+            if hasattr(self.runner, 'shutdown'):
+                self.runner.shutdown()
+
+    async def _run_impl(self, agent_name: str, upload: bool = False) -> Dict[str, Any]:
+        """Implementation of the agent evaluation pipeline"""
         
         # Initialize logging for main run
         trace_mode = get_trace_mode()

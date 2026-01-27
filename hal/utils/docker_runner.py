@@ -118,6 +118,11 @@ class DockerRunner:
         # Ensure the Docker image exists
         self._ensure_docker_image()
 
+    def shutdown(self):
+        """Shutdown the thread pool executor"""
+        if self._executor:
+            self._executor.shutdown(wait=True)
+
     def _slugify_label(self, value: str, fallback: str) -> str:
         value = (value or "").strip()
         if not value:
