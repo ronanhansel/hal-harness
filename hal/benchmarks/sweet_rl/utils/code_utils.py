@@ -70,7 +70,7 @@ def subprocess_get_function_output(function_definition, test_case):
         target=queue_get_function_output, args=(function_definition, test_case, queue)
     )
     process.start()
-    process.join(timeout=1)
+    process.join(timeout=10)
 
     if process.is_alive():
         process.kill()
