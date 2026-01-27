@@ -668,8 +668,15 @@ class DockerRunner:
                 host_root = await loop.run_in_executor(self._executor, _setup_files)
                 return await self._start_pool_container(host_root)
 
-            # Start containers in parallel
-            tasks = [_setup_and_start_container() for _ in range(self._pool_size())]
+            # Start containers in parallel with a semaphore to prevent I/O storm
+            # Limit concurrent creation to 10 per process (10 * 10 models = 100 global concurrent starts)
+            creation_sem = asyncio.Semaphore(10)
+            
+            async def _throttled_create():
+                async with creation_sem:
+                    return await _setup_and_start_container()
+
+            tasks = [_throttled_create() for _ in range(self._pool_size())]
             leases = await asyncio.gather(*tasks)
 
             for lease in leases:
