@@ -63,14 +63,16 @@ def subprocess_get_function_output(function_definition, test_case):
     if "exit(" in function_definition or "quit(" in function_definition:
         return None
 
-    # Use spawn context to avoid deadlock when forking from a threaded process
-    ctx = multiprocessing.get_context("spawn")
-    queue = ctx.Queue()
-    process = ctx.Process(
+    # Set the signal handler for SIGALRM
+    # signal.signal(signal.SIGALRM, timeout_handler)
+    # signal.alarm(1)  # Set an alarm for 10 seconds
+    # try:
+    queue = multiprocessing.Queue()
+    process = multiprocessing.Process(
         target=queue_get_function_output, args=(function_definition, test_case, queue)
     )
     process.start()
-    process.join(timeout=10)
+    process.join(timeout=5)
 
     if process.is_alive():
         process.kill()
@@ -124,17 +126,7 @@ def code_evaluate(trajectories):
     all_correctness = []
     skipped = 0
     
-    import os
     from concurrent.futures import ThreadPoolExecutor
-
-    # Use a heuristic for max_workers to avoid oversubscribing the system when running multiple models.
-    # Default to cpu_count // 8 (e.g. 14 workers on 112-core machine), which times 10 models = 140 processes.
-    total_cores = os.cpu_count() or 32
-    default_workers = max(1, total_cores // 8)
-    max_workers = int(os.environ.get("HAL_EVAL_WORKERS", default_workers))
-    max_workers = min(len(trajectories), max_workers)
-
-    print(f"[code_evaluate] Starting evaluation of {len(trajectories)} trajectories with {max_workers} workers")
 
     def evaluate_single_trajectory(item):
         i, trajectory = item
@@ -169,29 +161,8 @@ def code_evaluate(trajectories):
             print(f"[code_evaluate] Error evaluating task {i}: {e}. Marking as failed.")
             return 0, False
 
-    print(f"[code_evaluate] Starting evaluation of {len(trajectories)} trajectories with {max_workers} workers")
-    from tqdm import tqdm
-    from concurrent.futures import as_completed
-    
-    # Store results in a dict to preserve order later
-    results_map = {}
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        futures = {executor.submit(evaluate_single_trajectory, item): item[0] for item in enumerate(trajectories)}
-        
-        # Process as they complete
-        for future in tqdm(as_completed(futures), total=len(trajectories), desc="Evaluating"):
-            idx = futures[future]
-            try:
-                result = future.result()
-                results_map[idx] = result
-            except Exception as e:
-                print(f"[code_evaluate] Task {idx} generated an exception: {e}")
-                results_map[idx] = (0, True) # Treat as skipped/failed
-
-    # Reconstruct list in order
-    results = [results_map[i] for i in range(len(trajectories))]
+    with ThreadPoolExecutor(max_workers=32) as executor:
+        results = list(executor.map(evaluate_single_trajectory, enumerate(trajectories)))
 
     for correctness, is_skipped in results:
         all_correctness.append(correctness)
