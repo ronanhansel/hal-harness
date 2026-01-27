@@ -127,10 +127,14 @@ def code_evaluate(trajectories):
     import os
     from concurrent.futures import ThreadPoolExecutor
 
-    # Use more workers on high-core machines to fully utilize CPU.
-    # Each worker evaluates one trajectory and spawns subprocesses for test cases.
-    cpu_count = os.cpu_count() or 32
-    max_workers = min(len(trajectories), cpu_count)
+    # Use a heuristic for max_workers to avoid oversubscribing the system when running multiple models.
+    # Default to cpu_count // 8 (e.g. 14 workers on 112-core machine), which times 10 models = 140 processes.
+    total_cores = os.cpu_count() or 32
+    default_workers = max(1, total_cores // 8)
+    max_workers = int(os.environ.get("HAL_EVAL_WORKERS", default_workers))
+    max_workers = min(len(trajectories), max_workers)
+
+    print(f"[code_evaluate] Starting evaluation of {len(trajectories)} trajectories with {max_workers} workers")
 
     def evaluate_single_trajectory(item):
         i, trajectory = item
@@ -165,9 +169,29 @@ def code_evaluate(trajectories):
             print(f"[code_evaluate] Error evaluating task {i}: {e}. Marking as failed.")
             return 0, False
 
+    print(f"[code_evaluate] Starting evaluation of {len(trajectories)} trajectories with {max_workers} workers")
     from tqdm import tqdm
+    from concurrent.futures import as_completed
+    
+    # Store results in a dict to preserve order later
+    results_map = {}
+    
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        results = list(tqdm(executor.map(evaluate_single_trajectory, enumerate(trajectories)), total=len(trajectories), desc="Evaluating"))
+        # Submit all tasks
+        futures = {executor.submit(evaluate_single_trajectory, item): item[0] for item in enumerate(trajectories)}
+        
+        # Process as they complete
+        for future in tqdm(as_completed(futures), total=len(trajectories), desc="Evaluating"):
+            idx = futures[future]
+            try:
+                result = future.result()
+                results_map[idx] = result
+            except Exception as e:
+                print(f"[code_evaluate] Task {idx} generated an exception: {e}")
+                results_map[idx] = (0, True) # Treat as skipped/failed
+
+    # Reconstruct list in order
+    results = [results_map[i] for i in range(len(trajectories))]
 
     for correctness, is_skipped in results:
         all_correctness.append(correctness)
