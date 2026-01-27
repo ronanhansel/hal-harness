@@ -63,12 +63,10 @@ def subprocess_get_function_output(function_definition, test_case):
     if "exit(" in function_definition or "quit(" in function_definition:
         return None
 
-    # Set the signal handler for SIGALRM
-    # signal.signal(signal.SIGALRM, timeout_handler)
-    # signal.alarm(1)  # Set an alarm for 10 seconds
-    # try:
-    queue = multiprocessing.Queue()
-    process = multiprocessing.Process(
+    # Use spawn context to avoid deadlock when forking from a threaded process
+    ctx = multiprocessing.get_context("spawn")
+    queue = ctx.Queue()
+    process = ctx.Process(
         target=queue_get_function_output, args=(function_definition, test_case, queue)
     )
     process.start()
