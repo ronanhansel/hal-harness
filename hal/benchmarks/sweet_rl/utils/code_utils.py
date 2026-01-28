@@ -140,11 +140,16 @@ def code_evaluate(trajectories):
     all_correctness = []
     skipped = 0
     timed_out = 0
+    cancelled = 0
 
     from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+    import time
 
     # Timeout per task evaluation (seconds) - prevents hanging on faulty code
     TASK_EVAL_TIMEOUT = 60
+    # Overall evaluation timeout (seconds) - ensures evaluation always completes
+    # Set to 30 minutes for 1000 tasks (1.8s average per task with buffer)
+    OVERALL_TIMEOUT = 1800
 
     def evaluate_single_trajectory(item):
         i, trajectory = item
@@ -183,6 +188,8 @@ def code_evaluate(trajectories):
 
     # Use as_completed with per-task timeout to prevent hanging
     results_dict = {}
+    eval_start_time = time.time()
+
     with ThreadPoolExecutor(max_workers=32) as executor:
         # Submit all tasks and track them by index
         future_to_idx = {
@@ -192,19 +199,35 @@ def code_evaluate(trajectories):
 
         # Process completed tasks with progress bar
         with tqdm(total=len(trajectories), desc="Evaluating") as pbar:
-            for future in as_completed(future_to_idx, timeout=None):
-                idx = future_to_idx[future]
-                try:
-                    # Per-task timeout - prevents single task from blocking
-                    i, correctness, is_skipped = future.result(timeout=TASK_EVAL_TIMEOUT)
-                    results_dict[i] = (correctness, is_skipped, False)
-                except FuturesTimeoutError:
-                    print(f"[code_evaluate] Task {idx} timed out after {TASK_EVAL_TIMEOUT}s, marking as failed")
-                    results_dict[idx] = (0, False, True)
-                except Exception as e:
-                    print(f"[code_evaluate] Task {idx} raised exception: {e}, marking as failed")
-                    results_dict[idx] = (0, False, False)
-                pbar.update(1)
+            try:
+                for future in as_completed(future_to_idx, timeout=OVERALL_TIMEOUT):
+                    # Check if we've exceeded overall timeout
+                    elapsed = time.time() - eval_start_time
+                    remaining_timeout = max(1, OVERALL_TIMEOUT - elapsed)
+
+                    idx = future_to_idx[future]
+                    try:
+                        # Per-task timeout - use remaining time or task timeout, whichever is smaller
+                        task_timeout = min(TASK_EVAL_TIMEOUT, remaining_timeout)
+                        i, correctness, is_skipped = future.result(timeout=task_timeout)
+                        results_dict[i] = (correctness, is_skipped, False)
+                    except FuturesTimeoutError:
+                        print(f"[code_evaluate] Task {idx} timed out after {TASK_EVAL_TIMEOUT}s, marking as failed")
+                        results_dict[idx] = (0, False, True)
+                    except Exception as e:
+                        print(f"[code_evaluate] Task {idx} raised exception: {e}, marking as failed")
+                        results_dict[idx] = (0, False, False)
+                    pbar.update(1)
+            except FuturesTimeoutError:
+                # Overall timeout reached - cancel remaining futures and mark as failed
+                print(f"\n[code_evaluate] OVERALL TIMEOUT ({OVERALL_TIMEOUT}s) reached, cancelling remaining tasks...")
+                for future, idx in future_to_idx.items():
+                    if idx not in results_dict:
+                        future.cancel()
+                        results_dict[idx] = (0, False, True)
+                        cancelled += 1
+                        pbar.update(1)
+                print(f"[code_evaluate] Cancelled {cancelled} remaining tasks")
 
     # Reconstruct results in original order
     for i in range(len(trajectories)):
@@ -219,11 +242,14 @@ def code_evaluate(trajectories):
             # Should not happen, but handle gracefully
             print(f"[code_evaluate] Task {i} missing from results, marking as failed")
             all_correctness.append(0)
+            cancelled += 1
 
     if skipped > 0:
         print(f"[code_evaluate] WARNING: Skipped {skipped} failed/invalid tasks (counted as 0)")
     if timed_out > 0:
         print(f"[code_evaluate] WARNING: {timed_out} tasks timed out (counted as 0)")
+    if cancelled > 0:
+        print(f"[code_evaluate] WARNING: {cancelled} tasks cancelled due to overall timeout (counted as 0)")
 
     if len(all_correctness) > 0:
         print(f"Average correctness: {sum(all_correctness)/len(all_correctness)}")
