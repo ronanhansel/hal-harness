@@ -63,10 +63,6 @@ def subprocess_get_function_output(function_definition, test_case):
     if "exit(" in function_definition or "quit(" in function_definition:
         return None
 
-    # Set the signal handler for SIGALRM
-    # signal.signal(signal.SIGALRM, timeout_handler)
-    # signal.alarm(1)  # Set an alarm for 10 seconds
-    # try:
     queue = multiprocessing.Queue()
     process = multiprocessing.Process(
         target=queue_get_function_output, args=(function_definition, test_case, queue)
@@ -75,13 +71,31 @@ def subprocess_get_function_output(function_definition, test_case):
     process.join(timeout=5)
 
     if process.is_alive():
-        process.kill()
-        process.join()  # Reap the zombie
+        # First try terminate (SIGTERM), then kill (SIGKILL) if still alive
+        process.terminate()
+        process.join(timeout=1)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=1)  # Reap the zombie with timeout
+
+    # Close the process to free resources
+    try:
+        process.close()
+    except (ValueError, AttributeError):
+        pass  # close() not available in older Python versions or already closed
 
     try:
         result = queue.get(timeout=0.1)
     except Empty:
         result = None
+
+    # Explicitly close the queue to prevent resource leaks
+    try:
+        queue.close()
+        queue.join_thread()
+    except Exception:
+        pass
+
     return result
 
 
@@ -125,24 +139,28 @@ def check_correctness(ground_truth_function, test_function, test_cases):
 def code_evaluate(trajectories):
     all_correctness = []
     skipped = 0
-    
-    from concurrent.futures import ThreadPoolExecutor
+    timed_out = 0
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+
+    # Timeout per task evaluation (seconds) - prevents hanging on faulty code
+    TASK_EVAL_TIMEOUT = 60
 
     def evaluate_single_trajectory(item):
         i, trajectory = item
         # Skip failed tasks (returned as error strings instead of dicts)
         if not isinstance(trajectory, dict):
             print(f"[code_evaluate] Skipping task {i}: not a dict (likely failed task)")
-            return 0, True
+            return i, 0, True
 
         # Check required fields exist
         if "task" not in trajectory or "answer" not in trajectory:
             print(f"[code_evaluate] Skipping task {i}: missing 'task' or 'answer' field")
-            return 0, True
+            return i, 0, True
 
         if not isinstance(trajectory["task"], dict):
             print(f"[code_evaluate] Skipping task {i}: 'task' is not a dict")
-            return 0, True
+            return i, 0, True
 
         ground_truth_function = trajectory["task"].get("ground_truth")
         test_function = trajectory["answer"]
@@ -150,28 +168,62 @@ def code_evaluate(trajectories):
 
         if not ground_truth_function or not test_cases:
             print(f"[code_evaluate] Skipping task {i}: missing ground_truth or test_cases")
-            return 0, True
+            return i, 0, True
 
         try:
             correctness = check_correctness(
                 ground_truth_function, test_function, test_cases
             )
-            return correctness, False
+            return i, correctness, False
         except Exception as e:
             print(f"[code_evaluate] Error evaluating task {i}: {e}. Marking as failed.")
-            return 0, False
+            return i, 0, False
 
     from tqdm import tqdm
-    with ThreadPoolExecutor(max_workers=32) as executor:
-        results = list(tqdm(executor.map(evaluate_single_trajectory, enumerate(trajectories)), total=len(trajectories), desc="Evaluating"))
 
-    for correctness, is_skipped in results:
-        all_correctness.append(correctness)
-        if is_skipped:
-            skipped += 1
+    # Use as_completed with per-task timeout to prevent hanging
+    results_dict = {}
+    with ThreadPoolExecutor(max_workers=32) as executor:
+        # Submit all tasks and track them by index
+        future_to_idx = {
+            executor.submit(evaluate_single_trajectory, (i, traj)): i
+            for i, traj in enumerate(trajectories)
+        }
+
+        # Process completed tasks with progress bar
+        with tqdm(total=len(trajectories), desc="Evaluating") as pbar:
+            for future in as_completed(future_to_idx, timeout=None):
+                idx = future_to_idx[future]
+                try:
+                    # Per-task timeout - prevents single task from blocking
+                    i, correctness, is_skipped = future.result(timeout=TASK_EVAL_TIMEOUT)
+                    results_dict[i] = (correctness, is_skipped, False)
+                except FuturesTimeoutError:
+                    print(f"[code_evaluate] Task {idx} timed out after {TASK_EVAL_TIMEOUT}s, marking as failed")
+                    results_dict[idx] = (0, False, True)
+                except Exception as e:
+                    print(f"[code_evaluate] Task {idx} raised exception: {e}, marking as failed")
+                    results_dict[idx] = (0, False, False)
+                pbar.update(1)
+
+    # Reconstruct results in original order
+    for i in range(len(trajectories)):
+        if i in results_dict:
+            correctness, is_skipped, is_timed_out = results_dict[i]
+            all_correctness.append(correctness)
+            if is_skipped:
+                skipped += 1
+            if is_timed_out:
+                timed_out += 1
+        else:
+            # Should not happen, but handle gracefully
+            print(f"[code_evaluate] Task {i} missing from results, marking as failed")
+            all_correctness.append(0)
 
     if skipped > 0:
         print(f"[code_evaluate] WARNING: Skipped {skipped} failed/invalid tasks (counted as 0)")
+    if timed_out > 0:
+        print(f"[code_evaluate] WARNING: {timed_out} tasks timed out (counted as 0)")
 
     if len(all_correctness) > 0:
         print(f"Average correctness: {sum(all_correctness)/len(all_correctness)}")
