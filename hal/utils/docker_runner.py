@@ -29,6 +29,12 @@ DOCKER_IMAGE_NAME = "hal-agent-runner:latest"
 AGENT_ENV_PYTHON_VERSION = "3.11"  # Hardcoded to ensure Python 3.11 is always used
 AGENT_ENV_TEMPLATE_VERSION = "7"  # v7: use mamba instead of conda for faster env creation
 
+# Task hang detection and automatic retry configuration
+# When a task exceeds TASK_HANG_TIMEOUT_SECONDS, it will be forcibly terminated and retried automatically.
+# This prevents a single hung task from blocking the entire evaluation indefinitely.
+TASK_HANG_TIMEOUT_SECONDS = int(os.getenv("HAL_TASK_HANG_TIMEOUT", "900"))  # 15 minutes default
+TASK_MAX_RETRIES = int(os.getenv("HAL_TASK_MAX_RETRIES", "3"))  # Max retry attempts for hung tasks (4 total attempts)
+
 @dataclass
 class _ContainerLease:
     container_id: str
@@ -1258,10 +1264,10 @@ class DockerRunner:
                           progress: Optional[Progress] = None,
                           task: Optional[TaskID] = None,
                           env_override: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
-        """Process a single task with semaphore control"""
+        """Process a single task with semaphore control, timeout enforcement, and automatic retry"""
         async with self._semaphore:
             verbose_logger.debug(f"Starting task {task_id} (active tasks: {self.max_concurrent - self._semaphore._value})")
-            
+
             # Extract timeout from agent_args if present
             timeout = 7200
             if agent_args and 'timeout' in agent_args:
@@ -1270,30 +1276,123 @@ class DockerRunner:
                 except (ValueError, TypeError):
                     verbose_logger.debug(f"Invalid timeout value in agent_args: {agent_args['timeout']}, using default")
 
-            result = await self._run_single_task(
-                task_id=task_id,
-                input_data=input_data,
-                agent_function=agent_function,
-                agent_dir=agent_dir,
-                agent_args=agent_args,
-                run_id=run_id,
-                timeout=timeout,
-                env_override=env_override
-            )
-            
+            # Use hang detection timeout - the maximum time before we consider a task hung
+            # This is separate from the task's internal timeout to catch cases where the task
+            # is stuck (e.g., network hang, Docker daemon issue) and not making progress
+            hang_timeout = max(timeout + 300, TASK_HANG_TIMEOUT_SECONDS)  # At least task timeout + 5 min buffer
+
+            result = None
+            last_error = None
+
+            # Retry loop for hung tasks
+            for attempt in range(TASK_MAX_RETRIES + 1):
+                try:
+                    if attempt > 0:
+                        verbose_logger.warning(
+                            f"[RETRY] Task {task_id} - Attempt {attempt + 1}/{TASK_MAX_RETRIES + 1} "
+                            f"after previous hang/timeout"
+                        )
+                        print(f"[hal][WARNING] Retrying task {task_id} (attempt {attempt + 1}/{TASK_MAX_RETRIES + 1})")
+
+                    # Wrap the task execution with asyncio.wait_for to enforce a hard timeout
+                    # This catches cases where the subprocess hangs indefinitely
+                    result = await asyncio.wait_for(
+                        self._run_single_task(
+                            task_id=task_id,
+                            input_data=input_data,
+                            agent_function=agent_function,
+                            agent_dir=agent_dir,
+                            agent_args=agent_args,
+                            run_id=run_id,
+                            timeout=timeout,
+                            env_override=env_override
+                        ),
+                        timeout=hang_timeout
+                    )
+
+                    # Check if result indicates a timeout/error that might be retryable
+                    if result and task_id in result:
+                        result_value = result[task_id]
+                        if isinstance(result_value, str) and result_value.startswith("TIMEOUT"):
+                            # Internal timeout - might be worth retrying
+                            if attempt < TASK_MAX_RETRIES:
+                                verbose_logger.warning(
+                                    f"[HANG] Task {task_id} timed out internally, will retry"
+                                )
+                                last_error = result_value
+                                await asyncio.sleep(5)  # Brief pause before retry
+                                continue
+
+                    # Success or non-retryable result
+                    break
+
+                except asyncio.TimeoutError:
+                    # Task hung beyond the hang detection timeout
+                    verbose_logger.warning(
+                        f"[HANG DETECTED] Task {task_id} exceeded hang timeout of {hang_timeout}s "
+                        f"(attempt {attempt + 1}/{TASK_MAX_RETRIES + 1})"
+                    )
+                    print(
+                        f"[hal][WARNING] Task {task_id} HUNG for >{hang_timeout}s - "
+                        f"{'retrying' if attempt < TASK_MAX_RETRIES else 'giving up'}"
+                    )
+                    last_error = f"HANG_TIMEOUT after {hang_timeout}s"
+
+                    if attempt < TASK_MAX_RETRIES:
+                        # Clean up any lingering containers for this task before retry
+                        await self._cleanup_hung_task_containers(task_id)
+                        await asyncio.sleep(10)  # Longer pause for hung tasks
+                        continue
+                    else:
+                        # Max retries exceeded
+                        result = {task_id: f"ERROR: Task hung after {TASK_MAX_RETRIES + 1} attempts. Last error: {last_error}"}
+
+                except Exception as e:
+                    verbose_logger.error(f"[ERROR] Task {task_id} failed with exception: {e}")
+                    if attempt < TASK_MAX_RETRIES:
+                        last_error = str(e)
+                        await asyncio.sleep(5)
+                        continue
+                    result = {task_id: f"ERROR: {str(e)}"}
+
             # Write result to submissions file
             if result:
                 async with self._file_lock:
                     with open(submissions_file, "a") as f:
                         json.dump(result, f)
                         f.write("\n")
-            
+
             # Update progress after task completion
             if progress and task is not None:
                 progress.update(task, advance=1)
-            
+
             verbose_logger.debug(f"Completed task {task_id}")
             return result
+
+    async def _cleanup_hung_task_containers(self, task_id: str) -> None:
+        """Clean up any containers that might be associated with a hung task"""
+        try:
+            # Find and kill containers that might be related to this task
+            loop = asyncio.get_running_loop()
+            containers = await loop.run_in_executor(
+                self._executor,
+                lambda: self.docker_client.containers.list(all=True)
+            )
+            for container in containers:
+                container_name = container.name or ""
+                # Check if container name contains task-related identifiers
+                if "agentrun" in container_name.lower():
+                    try:
+                        # Check if container is stuck
+                        status = container.status
+                        if status in ("running", "created"):
+                            verbose_logger.debug(f"Cleaning up potentially hung container: {container_name}")
+                            container.kill()
+                            container.remove(force=True)
+                    except Exception as e:
+                        verbose_logger.debug(f"Failed to cleanup container {container_name}: {e}")
+        except Exception as e:
+            verbose_logger.debug(f"Error during hung task cleanup: {e}")
 
     async def _run_single_task(self,
                              task_id: str,
