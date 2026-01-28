@@ -31,13 +31,20 @@ def timeout_handler(signum, frame):
 def get_function_output(function_definition, test_case):
     # exec(disable_printing)
     try:
-        exec(function_definition)
-        return eval(test_case)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=SyntaxWarning)
+            exec(function_definition)
+            return eval(test_case)
     except Exception as e:
         return None
 
 
 def queue_get_function_output(function_definition, test_case, queue):
+    try:
+        exec(disable_printing)
+    except:
+        pass
     queue.put(get_function_output(function_definition, test_case))
 
 
@@ -108,17 +115,9 @@ def check_correctness(ground_truth_function, test_function, test_cases):
     for test_case in test_cases.values():
         ground_truth_output = get_function_output(ground_truth_function, test_case)
 
-        # timeout precautions
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(1)  # Set an alarm for 10 seconds
-        try:
-            # print(test_function)
-            # if "match_player" in test_function:
-            #     return 0
-            test_output = get_function_output(test_function, test_case)
-        except TimeoutError:
-            test_output = None
-        signal.alarm(0)  # Reset the alarm
+        # Use subprocess for isolation and robust timeout
+        test_output = subprocess_get_function_output(test_function, test_case)
+
         try:
             if ground_truth_output == test_output and ground_truth_output is not None:
                 num_correct += 1
@@ -130,7 +129,9 @@ def check_correctness(ground_truth_function, test_function, test_cases):
 def code_evaluate(trajectories):
     all_correctness = []
     skipped = 0
+    total_tasks = len(trajectories)
     for i, trajectory in enumerate(trajectories):
+        print(f"[code_evaluate] Evaluating task {i+1}/{total_tasks}...")
         # Skip failed tasks (returned as error strings instead of dicts)
         if not isinstance(trajectory, dict):
             print(f"[code_evaluate] Skipping task {i}: not a dict (likely failed task)")
