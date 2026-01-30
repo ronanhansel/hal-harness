@@ -39,7 +39,8 @@ class LocalRunner:
                        run_id: str,
                        benchmark: Optional[BaseBenchmark] = None,
                        progress: Optional[Progress] = None,
-                       task: Optional[TaskID] = None) -> Dict[str, Any]:
+                       task: Optional[TaskID] = None,
+                       task_env_overrides: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, Any]:
         """
         Run agent on all tasks with concurrency control
         """

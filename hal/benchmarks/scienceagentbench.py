@@ -62,9 +62,8 @@ class ScienceAgentBench(BaseBenchmark):
             dataset_folder = task["dataset_folder_tree"].split("\n")[0][4:]
             # Source path is in the submodule's benchmark/datasets/ directory
             src_dataset_path = os.path.join(submodule_path, "benchmark/datasets/", dataset_folder)
-            # Destination path must be under "environment/" because docker_runner creates
-            # /workspace/environment and run_agent.py changes cwd to it
-            dest_dataset_path = os.path.join("environment/benchmark/datasets/", dataset_folder)
+            # Destination path must be under "benchmark/" to match the prompt and evaluation environment
+            dest_dataset_path = os.path.join("benchmark/datasets/", dataset_folder)
             self.benchmark[task_id]['files'] = {
                 dest_dataset_path: src_dataset_path,
             }
@@ -195,6 +194,7 @@ class ScienceAgentBench(BaseBenchmark):
             instance_ids=task_ids,
             max_workers=os.cpu_count() // 2,
             force_rebuild=True,
+            force_rebuild_base=False,
             cache_level="none",
             clean=False,
             open_file_limit=4096,

@@ -470,10 +470,6 @@ class CoreBenchHard(CoreBench):
         for target_path, source_path in files_dict.items():
             normalized_path = target_path.replace("\\", "/")
             
-            # Skip files in results directory
-            if "/results/" in normalized_path:
-                continue
-                
             # Skip REPRODUCING.md file
             if normalized_path.endswith("/REPRODUCING.md"):
                 continue
@@ -484,6 +480,11 @@ class CoreBenchHard(CoreBench):
                 
             # Skip run scripts
             if normalized_path.endswith("/code/run.sh") or normalized_path.endswith("/code/run"):
+                continue
+            
+            # For Hard mode, we remove everything from the results directory
+            # BUT we keep the directory structure itself if needed
+            if "/results/" in normalized_path:
                 continue
                 
             # Include all other files

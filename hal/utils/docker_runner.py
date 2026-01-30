@@ -7,6 +7,7 @@ import tempfile
 import subprocess
 import logging
 import docker
+from docker.types import DeviceRequest
 import time
 import hashlib
 import shlex
@@ -32,7 +33,7 @@ AGENT_ENV_TEMPLATE_VERSION = "7"  # v7: use mamba instead of conda for faster en
 # Task hang detection and automatic retry configuration
 # When a task exceeds TASK_HANG_TIMEOUT_SECONDS, it will be forcibly terminated and retried automatically.
 # This prevents a single hung task from blocking the entire evaluation indefinitely.
-TASK_HANG_TIMEOUT_SECONDS = int(os.getenv("HAL_TASK_HANG_TIMEOUT", "900"))  # 15 minutes default
+TASK_HANG_TIMEOUT_SECONDS = int(os.getenv("HAL_TASK_HANG_TIMEOUT", "1800"))  # 30 minutes default
 TASK_MAX_RETRIES = int(os.getenv("HAL_TASK_MAX_RETRIES", "3"))  # Max retry attempts for hung tasks (4 total attempts)
 
 @dataclass
@@ -222,7 +223,7 @@ class DockerRunner:
 
             QUEUE_DIR = os.getenv("HAL_TASK_QUEUE_DIR", "/workspace/queue")
             AGENT_PYTHON = os.getenv("HAL_AGENT_PYTHON", "/opt/conda/envs/agent_env/bin/python")
-            VENV_PATH = os.getenv("HAL_TASK_VENV_PATH", "/tmp/hal_task_venv")
+            VENV_PATH = os.getenv("HAL_TASK_VENV_PATH", "/workspace/hal_task_venv")
             USE_VENV = (os.getenv("HAL_DOCKER_TASK_VENV") or "1").strip().lower() in ("1", "true", "yes")
 
             def _tail(text: str, limit: int = 4000) -> str:
@@ -581,6 +582,7 @@ class DockerRunner:
                 extra_hosts=extra_hosts,
                 volumes=volumes if volumes else None,
                 tmpfs=tmpfs,
+                device_requests=[DeviceRequest(count=-1, capabilities=[["gpu"]])],
             )
         )
 
@@ -634,7 +636,7 @@ class DockerRunner:
             env_vars["HAL_TASK_DIR"] = "/workspace/task"
             env_vars["HAL_TASK_ENVIRONMENT_DIR"] = "/workspace/task/environment"
             env_vars["HAL_TASK_QUEUE_DIR"] = "/workspace/queue"
-            env_vars["HAL_TASK_VENV_PATH"] = "/tmp/hal_task_venv"
+            env_vars["HAL_TASK_VENV_PATH"] = "/workspace/hal_task_venv"
             env_vars["HAL_AGENT_PYTHON"] = "/opt/conda/envs/agent_env/bin/python"
             env_vars["HAL_DOCKER_TASK_VENV"] = "1" if self._task_venv else "0"
             volumes_base = self._configure_azure_mount(env_vars)
@@ -1269,7 +1271,7 @@ class DockerRunner:
             verbose_logger.debug(f"Starting task {task_id} (active tasks: {self.max_concurrent - self._semaphore._value})")
 
             # Extract timeout from agent_args if present
-            timeout = 7200
+            timeout = 14400
             if agent_args and 'timeout' in agent_args:
                 try:
                     timeout = int(agent_args['timeout'])
@@ -1520,6 +1522,7 @@ class DockerRunner:
                         extra_hosts=extra_hosts,
                         volumes=volumes if volumes else None,
                         tmpfs=tmpfs,
+                        device_requests=[DeviceRequest(count=-1, capabilities=[["gpu"]])],
                     )
                 )
             except docker.errors.APIError as e:
@@ -1537,6 +1540,7 @@ class DockerRunner:
                             network_mode=self.network_mode,
                             volumes=volumes if volumes else None,
                             tmpfs=tmpfs,
+                            device_requests=[DeviceRequest(count=-1, capabilities=[["gpu"]])],
                         )
                     )
                 else:
@@ -1818,7 +1822,7 @@ class DockerRunner:
             await proc.communicate()
 
             agent_dir_path = Path(agent_dir).resolve()
-            venv_path = "/tmp/hal_task_venv"
+            venv_path = "/workspace/hal_task_venv"
             venv_enabled = self._task_venv
 
             with open(task_root / "input.json", "w") as f:

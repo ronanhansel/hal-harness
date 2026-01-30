@@ -113,6 +113,7 @@ AUTHORIZED_IMPORTS = [
     "glob",
     "shutil",
     "struct",
+    "textwrap",
     "typing",
     "warnings",
     "logging",
@@ -440,6 +441,10 @@ def get_agent(model_params) -> CodeAgent:
         # Should not happen - we always want TRAPI
         raise RuntimeError(f"use_azure=False but TRAPI is required. Set USE_DIRECT_AZURE=true. model_params={model_params}")
 
+    # Create customized PythonInterpreterTool that allows 'open'
+    python_interpreter = PythonInterpreterTool(authorized_imports=AUTHORIZED_IMPORTS)
+    python_interpreter.base_python_tools["open"] = open
+
     # Create a CodeAgent instance with the specified model
     # Note: The local Python executor is patched to support:
     # - @ operator for matrix multiplication (via numpy.matmul)
@@ -448,7 +453,7 @@ def get_agent(model_params) -> CodeAgent:
     agent = CodeAgent(
         tools=[
             RateLimitAwareDuckDuckGoSearchTool(),
-            PythonInterpreterTool(authorized_imports=AUTHORIZED_IMPORTS),
+            python_interpreter,
             ModifiedWikipediaSearchTool(),
             FinalAnswerTool(description = """Submit your final Python function implementation.
 

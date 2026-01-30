@@ -51,6 +51,17 @@ def supports_stop_parameter(model_id: str) -> bool:
 # Replace the function in smolagents
 smolagents.models.supports_stop_parameter = supports_stop_parameter
 
+# Monkey-patch smolagents to allow posixpath and subprocess
+import smolagents.local_python_executor
+try:
+    if "posixpath" in smolagents.local_python_executor.DANGEROUS_MODULES:
+        smolagents.local_python_executor.DANGEROUS_MODULES.remove("posixpath")
+    if "subprocess" in smolagents.local_python_executor.DANGEROUS_MODULES:
+        smolagents.local_python_executor.DANGEROUS_MODULES.remove("subprocess")
+    print("[core_agent] Patched smolagents.local_python_executor to allow posixpath and subprocess")
+except Exception as e:
+    print(f"[core_agent] Failed to patch DANGEROUS_MODULES: {e}")
+
 from mdconvert import MarkdownConverter, DocumentConverterResult
 
 # Import agent_hints using absolute path
@@ -90,6 +101,9 @@ AUTHORIZED_IMPORTS = [
     "datetime",
     "fractions",
     "csv",
+    "typing",
+    "posixpath",
+    "subprocess",
 ]
 
 def save_agent_steps(agent, kwargs, response, sample):
@@ -358,6 +372,8 @@ def edit_file(command: str, path: str, content: Optional[str] = None,
 
         elif command == "create":
             if path.exists():
+                if path.is_dir():
+                    return f"Error: {path} is a directory. Please provide a filename inside this directory."
                 return f"Error: {path} already exists"
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, 'w') as f:
@@ -807,11 +823,16 @@ Respond with ONLY "GIVING_UP" if the answer indicates giving up, or "VALID_ATTEM
         model=model  # Pass the model for LLM-based checks
     )
     
+    # Create customized PythonInterpreterTool that allows 'open'
+    # This avoids 'Forbidden function evaluation: open' errors
+    python_interpreter = PythonInterpreterTool()
+    python_interpreter.base_python_tools["open"] = open
+
     # Include the custom tool directly in the CORE_TOOLS list
     CORE_TOOLS = [
         DuckDuckGoSearchTool(),
         VisitWebpageTool(),
-        PythonInterpreterTool(),
+        python_interpreter,
         execute_bash,
         TextInspectorTool(model=model, text_limit=5000),
         edit_file,
@@ -824,7 +845,7 @@ Respond with ONLY "GIVING_UP" if the answer indicates giving up, or "VALID_ATTEM
     agent = CodeAgent(
         tools=CORE_TOOLS,
         planning_interval=4,
-        max_steps=40,
+        max_steps=kwargs.get('max_steps', 5),
         model=model,
         additional_authorized_imports=AUTHORIZED_IMPORTS,
         budget_exceeded_callback=partial(check_budget_exceeded, budget=BUDGET, model_name=kwargs['model_name']) if BUDGET else None,

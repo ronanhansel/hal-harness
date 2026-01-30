@@ -94,6 +94,17 @@ else:
     # Replace the function in smolagents
     smolagents.models.supports_stop_parameter = supports_stop_parameter
 
+    # Monkey-patch smolagents to allow posixpath and subprocess
+    import smolagents.local_python_executor
+    try:
+        if "posixpath" in smolagents.local_python_executor.DANGEROUS_MODULES:
+            smolagents.local_python_executor.DANGEROUS_MODULES.remove("posixpath")
+        if "subprocess" in smolagents.local_python_executor.DANGEROUS_MODULES:
+            smolagents.local_python_executor.DANGEROUS_MODULES.remove("subprocess")
+        print("[hal_generalist_agent] Patched smolagents.local_python_executor to allow posixpath and subprocess")
+    except Exception as e:
+        print(f"[hal_generalist_agent] Failed to patch DANGEROUS_MODULES: {e}")
+
 try:
     from mdconvert import MarkdownConverter  # type: ignore
 except Exception as exc:  # pragma: no cover - fallback when optional deps missing
@@ -151,6 +162,8 @@ AUTHORIZED_IMPORTS = [
     "builtins.slice",
     "unicodedata",
     "stat",
+    "posixpath",
+    "subprocess",
 
     # === Numpy - explicit submodules for smolagents interpreter ===
     "numpy", "numpy.*",

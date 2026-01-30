@@ -114,7 +114,7 @@ def build_image(
             forcerm=True,
             decode=True,
             platform=platform,
-            nocache=use_nocache,
+            nocache=True,
         )
         buildlog = ""
         for chunk in response:
@@ -398,6 +398,7 @@ def build_container(
             platform=test_spec.platform,
             volumes=volumes,
             environment=env_vars if env_vars else None,
+            device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[['gpu']])]
         )
 
         logger.info(f"Container for {test_spec.instance_id} created: {container.id}")

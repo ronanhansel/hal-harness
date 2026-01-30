@@ -242,6 +242,7 @@ def main(
         azure_openai_api_version: str,
         azure_openai_endpoint: str,
         azure_openai_deployment_name: str,
+        force_rebuild_base: bool = False,
     ):
     """
     Run evaluation harness for the given dataset and predictions.
@@ -379,7 +380,7 @@ def main(
             print("No instances to run.")
         else:
             # build environment images + run instances
-            build_base_images(client, examples_to_run, benchmark_path, pred_program_path, force_rebuild)
+            build_base_images(client, examples_to_run, benchmark_path, pred_program_path, force_rebuild_base)
             run_instances(examples_to_run, benchmark_path, pred_program_path, cache_level, clean, force_rebuild, max_workers, run_id, timeout)
     finally:
         import time
@@ -473,6 +474,9 @@ if __name__ == "__main__":
         )
     parser.add_argument(
         "--force_rebuild", type=str2bool, default=False, help="Force rebuild of all images"
+    )
+    parser.add_argument(
+        "--force_rebuild_base", type=str2bool, default=False, help="Force rebuild of base images"
     )
     parser.add_argument(
         "--cache_level",

@@ -37,6 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libproj-dev \
     cmake \
     pkg-config \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Miniconda
@@ -68,6 +69,7 @@ RUN conda install -y -n base -c conda-forge mamba \
 RUN mamba install -y -n base -c conda-forge \
       r-base=4.2 \
       r-biocmanager \
+      r-rmarkdown \
       pandoc \
       texlive-core \
  && conda clean -afy
@@ -76,7 +78,7 @@ RUN mamba install -y -n base -c conda-forge \
 ENV SERPAPI_API_KEY=dummy-serpapi-key
 
 # Install common Python data science packages
-RUN pip install matplotlib numpy pandas scipy scikit-learn seaborn
+RUN pip install matplotlib numpy pandas scipy scikit-learn seaborn PyPDF2 xgboost ddgs
 
 # Install weave and pin gql < 4, plus wandb version compatible with weave tracing
 RUN pip install weave==0.51.41 "gql<4" wandb==0.17.9

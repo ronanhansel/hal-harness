@@ -23,18 +23,20 @@ def run(input_dict: dict[str, dict], **kwargs) -> dict[str, str]:
         agent = ScienceAgent(
             kwargs['model_name'],
             context_cutoff=28000,
-            max_tokens=kwargs['max_tokens'],
+            max_tokens=kwargs.get('max_tokens', 4096),
+            max_steps=kwargs.get('max_steps', 5),
             reasoning_effort=kwargs['reasoning_effort'],
-            use_self_debug=kwargs['use_self_debug'],
-            use_knowledge=kwargs['use_knowledge']
+            use_self_debug=kwargs.get('use_self_debug', False),
+            use_knowledge=kwargs.get('use_knowledge', False)
         )
     else:
         agent = ScienceAgent(
             kwargs['model_name'],
             context_cutoff=28000,
-            max_tokens=kwargs['max_tokens'],
-            use_self_debug=kwargs['use_self_debug'],
-            use_knowledge=kwargs['use_knowledge']
+            max_tokens=kwargs.get('max_tokens', 4096),
+            max_steps=kwargs.get('max_steps', 5),
+            use_self_debug=kwargs.get('use_self_debug', False),
+            use_knowledge=kwargs.get('use_knowledge', False)
         )
 
     task_id = list(input_dict.keys())[0]

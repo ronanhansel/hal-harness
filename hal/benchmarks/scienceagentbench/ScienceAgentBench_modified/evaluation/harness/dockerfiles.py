@@ -11,6 +11,8 @@ git \
 build-essential \
 libffi-dev \
 libtiff-dev \
+libgdal-dev \
+gdal-bin \
 python3 \
 python3-pip \
 python-is-python3 \

@@ -36,7 +36,7 @@ Here are some helpful previews for the dataset file(s):
 
 
 class ScienceAgent():
-    def __init__(self, llm_engine_name, context_cutoff=28000, max_tokens=4096, reasoning_effort=None, use_self_debug=False, use_knowledge=False):
+    def __init__(self, llm_engine_name, context_cutoff=28000, max_tokens=4096, max_steps=10, reasoning_effort=None, use_self_debug=False, use_knowledge=False):
         self.llm_engine = LiteLlmEngine(llm_engine_name, reasoning_effort)
 
         # Cost tracking disabled - set dummy values
@@ -47,6 +47,7 @@ class ScienceAgent():
 
         self.context_cutoff = context_cutoff
         self.max_tokens = max_tokens
+        self.max_steps = max_steps
         self.use_self_debug = use_self_debug
         self.use_knowledge = use_knowledge
 
@@ -235,7 +236,11 @@ class ScienceAgent():
         if self.use_self_debug:
             self.write_program(assistant_output, out_fname)
 
-            for t in range(10):
+            # Use self.max_tokens as an indicator for steps or just keep it reasonable
+            # The JSON config specifies max_steps: 5, but the original code had 10.
+            # I will use a default of 10 if not explicitly passed to the agent.
+            debug_steps = getattr(self, 'max_steps', 10)
+            for t in range(debug_steps):
                 halt, new_cost = self.step(out_fname, task["output_fname"])
                 cost += new_cost
                 if halt:

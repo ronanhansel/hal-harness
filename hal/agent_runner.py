@@ -223,6 +223,12 @@ class AgentRunner:
                     agent_output.update(previous_output)
             
         else:
+            # Collect task environment overrides from dataset
+            task_env_overrides = {}
+            for task_id, task_data in dataset.items():
+                if isinstance(task_data, dict) and "_fix_env" in task_data:
+                    task_env_overrides[task_id] = task_data["_fix_env"]
+
             # Run agent on all tasks
             with create_progress() as progress:
                 task = progress.add_task("Running agents... (check logs in results directory for more details)", total=len(dataset))
@@ -234,7 +240,8 @@ class AgentRunner:
                     run_id=self.run_id,
                     benchmark=self.benchmark,
                     task=task,
-                    progress=progress   
+                    progress=progress,
+                    task_env_overrides=task_env_overrides
                 )
             
             # If continuing run, merge with previous results
