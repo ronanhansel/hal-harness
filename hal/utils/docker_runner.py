@@ -1271,7 +1271,7 @@ class DockerRunner:
             verbose_logger.debug(f"Starting task {task_id} (active tasks: {self.max_concurrent - self._semaphore._value})")
 
             # Extract timeout from agent_args if present
-            timeout = 14400
+            timeout = 28800
             if agent_args and 'timeout' in agent_args:
                 try:
                     timeout = int(agent_args['timeout'])
