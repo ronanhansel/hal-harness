@@ -103,6 +103,10 @@ class SciCodeBenchmark(BaseBenchmark):
                     tmp_file = host_tmp_dir / f"{problem_id}.{subtask_step}.py"
 
                     with open(tmp_file, "w", encoding="utf-8") as f:
+                        f.write("import scipy.integrate\n")
+                        f.write("if not hasattr(scipy.integrate, 'simps'): scipy.integrate.simps = scipy.integrate.simpson\n")
+                        f.write("import numpy\n")
+                        f.write("if not hasattr(numpy, 'trapz'): numpy.trapz = numpy.trapezoid\n")
                         f.write(code_content)
                         f.write("\n\nfrom scicode.parse.parse import process_hdf5_to_tuple\n")
                         f.write(f"targets = process_hdf5_to_tuple('{step_id}', {len(test_lst)})\n")

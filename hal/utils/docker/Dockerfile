@@ -78,7 +78,7 @@ RUN mamba install -y -n base -c conda-forge \
 ENV SERPAPI_API_KEY=dummy-serpapi-key
 
 # Install common Python data science packages
-RUN pip install matplotlib numpy pandas scipy scikit-learn seaborn PyPDF2 xgboost ddgs
+RUN pip install matplotlib numpy pandas scipy scikit-learn seaborn PyPDF2 xgboost ddgs beautifulsoup4 lxml
 
 # Install weave and pin gql < 4, plus wandb version compatible with weave tracing
 RUN pip install weave==0.51.41 "gql<4" wandb==0.17.9

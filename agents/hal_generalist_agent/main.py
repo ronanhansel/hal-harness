@@ -164,6 +164,9 @@ AUTHORIZED_IMPORTS = [
     "stat",
     "posixpath",
     "subprocess",
+    "pathlib",
+    "textwrap",
+    "glob",
 
     # === Numpy - explicit submodules for smolagents interpreter ===
     "numpy", "numpy.*",

@@ -798,6 +798,7 @@ class DockerRunner:
                             " && conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r \\",
                             f" && mamba create -y -n agent_env python={AGENT_ENV_PYTHON_VERSION} \\",
                             " && conda run -n agent_env python -m pip install -U pip \\",
+                            " && conda run -n agent_env pip install matplotlib numpy pandas scipy scikit-learn seaborn PyPDF2 xgboost ddgs beautifulsoup4 lxml \\",
                             " && conda run -n agent_env pip install -r /tmp/requirements.txt \\",
                             " && conda run -n agent_env pip install weave==0.51.41 'gql<4' wandb==0.17.9",
                         ]

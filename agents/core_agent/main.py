@@ -104,6 +104,9 @@ AUTHORIZED_IMPORTS = [
     "typing",
     "posixpath",
     "subprocess",
+    "pathlib",
+    "textwrap",
+    "glob",
 ]
 
 def save_agent_steps(agent, kwargs, response, sample):
