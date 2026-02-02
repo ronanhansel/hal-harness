@@ -58,6 +58,7 @@ def run_instance(
         client: docker.DockerClient,
         run_id: str,
         timeout: int | None = None,
+        gpu_id: int | None = None,
     ):
     """
     Run a single instance with the given prediction.
@@ -70,6 +71,7 @@ def run_instance(
         client (docker.DockerClient): Docker client
         run_id (str): Run ID
         timeout (int): Timeout for running tests
+        gpu_id (int): ID of the GPU to use
     """
     # Set up logging directory
     instance_id = test_spec.instance_id
@@ -103,7 +105,7 @@ def run_instance(
     try:
         # Build + start instance container (instance image should already be built)
         test_spec.instance_path = instance_path
-        container = build_container(test_spec, client, run_id, logger, rm_image, force_rebuild)
+        container = build_container(test_spec, client, run_id, logger, rm_image, force_rebuild, gpu_id=gpu_id)
         container.start()
         
         logger.info(f"Container for {instance_id} started: {container.id}")
@@ -194,8 +196,9 @@ def run_instances(
                     client,
                     run_id,
                     timeout,
+                    gpu_id=idx % 4,  # Distribute across 4 GPUs
                 ): None
-                for test_spec in test_specs
+                for idx, test_spec in enumerate(test_specs)
             }
             # Wait for each future to complete
             for future in as_completed(futures):

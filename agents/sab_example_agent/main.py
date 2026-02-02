@@ -23,7 +23,7 @@ def run(input_dict: dict[str, dict], **kwargs) -> dict[str, str]:
         agent = ScienceAgent(
             kwargs['model_name'],
             context_cutoff=28000,
-            max_tokens=kwargs.get('max_tokens', 4096),
+            max_tokens=kwargs.get('max_tokens', 32768),
             max_steps=kwargs.get('max_steps', 5),
             reasoning_effort=kwargs['reasoning_effort'],
             use_self_debug=kwargs.get('use_self_debug', False),
@@ -33,7 +33,7 @@ def run(input_dict: dict[str, dict], **kwargs) -> dict[str, str]:
         agent = ScienceAgent(
             kwargs['model_name'],
             context_cutoff=28000,
-            max_tokens=kwargs.get('max_tokens', 4096),
+            max_tokens=kwargs.get('max_tokens', 32768),
             max_steps=kwargs.get('max_steps', 5),
             use_self_debug=kwargs.get('use_self_debug', False),
             use_knowledge=kwargs.get('use_knowledge', False)

@@ -194,7 +194,7 @@ def run(input: dict[str, Any], **kwargs) -> dict[str, str]:
                         cleaning_model = AzureDirectModel(
                             model_id=model_params.get('model_id', 'gpt-4o'),
                             temperature=model_params.get('temperature', 0.7),
-                            max_tokens=1024,  # Shorter for cleaning task
+                            max_tokens=16384,  # Increased for reasoning models
                         )
                     except Exception as e:
                         import traceback

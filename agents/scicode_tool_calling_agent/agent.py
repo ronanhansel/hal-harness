@@ -428,7 +428,7 @@ def get_agent(model_params) -> CodeAgent:
                 model = AzureDirectModel(
                     model_id=model_params.get('model_id', 'gpt-4o'),
                     temperature=model_params.get('temperature', 0.7),
-                    max_tokens=model_params.get('max_tokens', 4096),
+                    max_tokens=model_params.get('max_tokens', 32768),
                     num_retries=model_params.get('num_retries', 500),
                     timeout=model_params.get('timeout', 1800),
                 )

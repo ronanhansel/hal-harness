@@ -119,7 +119,14 @@ class SciCodeBenchmark(BaseBenchmark):
         skip_install = os.environ.get("SCICODE_EVAL_SKIP_INSTALL", "0").lower() in {"1", "true", "yes"}
 
         # Launch a Docker container that mounts self.benchmark_dir at /app and host_tmp_dir at /app/tmp_eval.
-        client = docker.from_env()
+        docker_timeout = int(os.environ.get("HAL_DOCKER_TIMEOUT", "600"))
+        docker_host = os.environ.get("HAL_DOCKER_HOST") or os.environ.get("DOCKER_HOST")
+        
+        if docker_host:
+            client = docker.DockerClient(base_url=docker_host, timeout=docker_timeout)
+        else:
+            client = docker.from_env(timeout=docker_timeout)
+
         container = client.containers.run(
             image_name,
             command="tail -f /dev/null",

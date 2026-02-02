@@ -304,6 +304,7 @@ def build_container(
         logger: logging.Logger,
         nocache: bool,
         force_rebuild: bool = False,
+        gpu_id: int | None = None,
     ):
     """
     Builds the instance image for the given test spec and creates a container from the image.
@@ -389,6 +390,11 @@ def build_container(
                 volumes[azure_dir] = {'bind': '/root/.azure', 'mode': 'rw'}
                 env_vars["HOME"] = "/root"
 
+        if gpu_id is not None:
+            device_requests = [docker.types.DeviceRequest(device_ids=[str(gpu_id)], capabilities=[['gpu']])]
+        else:
+            device_requests = [docker.types.DeviceRequest(count=-1, capabilities=[['gpu']])]
+
         container = client.containers.create(
             image=test_spec.instance_image_key,
             name=test_spec.get_instance_container_name(run_id),
@@ -398,7 +404,7 @@ def build_container(
             platform=test_spec.platform,
             volumes=volumes,
             environment=env_vars if env_vars else None,
-            device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[['gpu']])]
+            device_requests=device_requests
         )
 
         logger.info(f"Container for {test_spec.instance_id} created: {container.id}")

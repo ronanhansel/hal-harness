@@ -669,6 +669,7 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
             azure_kwargs = {
                 "model_id": model_id,
                 "temperature": model_params.get('temperature', 0.7),
+                "max_tokens": 32768,
             }
             if kwargs.get('reasoning_effort'):
                 azure_kwargs["reasoning_effort"] = kwargs['reasoning_effort']
